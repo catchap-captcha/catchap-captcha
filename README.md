@@ -1,0 +1,62 @@
+# CatChap Security CAPTCHA
+
+Visual Genome/TallyQA 기반의 다중 객체 직접 드래그 CAPTCHA입니다. 관리자 라벨링, 일회성 문제 발급·검증, 회원가입 토큰 소비, 행동 데이터 수집을 하나의 수직 흐름으로 제공합니다.
+
+## 데이터 저장
+
+- 문제 메타데이터와 bbox: MySQL `captcha_questions`, `captcha_objects`
+- 발급·시도·행동 요약·토큰: MySQL `captcha_challenges_v2`, `captcha_attempts`, `behavior_summaries`, `captcha_tokens`
+- 최종 이미지·조각: `data/final/images`, `data/final/pieces`
+- 라벨링 큐·결과: `data/labeling`
+- 원시 행동 이벤트: `data/runtime/behavior-events/YYYY/MM/DD`
+
+정답 역할과 원본 객체 ID는 공개 API 응답에 포함되지 않습니다. 문제별 객체 ID는 임시 ID로 치환됩니다.
+
+## 실행
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+npm install
+npm run build
+.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+로컬에서 `npm run dev`를 실행하면 SSH 터널을 자동으로 열고 서버의 FastAPI와
+연결합니다. 따라서 로컬에 별도로 백엔드를 실행할 필요가 없습니다. SSH 키가
+기본 경로와 다르면 `CAPTCHA_SSH_KEY`를 지정합니다. UI만 실행하는 명령은
+`npm run dev:ui`이며, 이 경우 `127.0.0.1:18000`에 별도 API 터널이 있어야 합니다.
+
+- 사용자 CAPTCHA 및 회원가입: `/`
+- 관리자 라벨링 콘솔: `/admin`
+- API 문서: `/docs`
+- 준비 상태: `/health/ready`
+
+## 라벨링 큐 생성
+
+이미 다운로드된 TallyQA, Visual Genome 이미지·객체·관계·메타데이터 ZIP을 직접 읽고 필요한 후보 이미지만 추출합니다.
+
+```bash
+.venv/bin/python scripts/build_labeling_queue.py --limit 100
+```
+
+후보의 bbox는 자동 연결하지만 `target` 여부는 확정하지 않습니다. 관리자가 `/admin`에서 `target`, `decoy`, `ambiguous`, `invalid`를 지정합니다. 승인 시 이미지와 객체 조각을 `data/final`로 복사하고 DB에 활성 문제로 등록합니다.
+
+승인 조건은 target 수와 TallyQA 정답 수가 같고 ambiguous 객체가 없는 것입니다.
+
+## API 흐름
+
+1. `POST /api/captcha/challenges`
+2. 객체를 정답존에 드래그
+3. `POST /api/captcha/challenges/{id}/verify`
+4. 성공 시 목적·세션에 묶인 1회용 토큰 발급
+5. `POST /api/signup`에서 토큰 소비 후 계정 생성
+
+원시 포인터 이벤트는 파일로, 행동 요약은 MySQL로 분리 저장합니다. 행동 점수는 현재 분석용이며 정답 판정을 변경하지 않습니다.
+
+## 운영 보안
+
+- `.env`의 앱 비밀키, 사이트 비밀키, 관리자 키를 충분히 긴 난수로 설정합니다.
+- `ALLOWED_ORIGINS`를 실제 연동 도메인으로 제한합니다.
+- HTTPS 리버스 프록시 뒤에서 실행하고 `TRUST_PROXY=true`를 적용합니다.
+- 관리자 라벨링 페이지는 별도 네트워크 접근제어 또는 SSO 뒤에 두는 것을 권장합니다.

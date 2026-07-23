@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>TallyQA CAPTCHA</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">CAPTCHA SERVICE</p>
+          <h1>TallyQA CAPTCHA</h1>
+        </div>
+        <span class="service-state" id="service-state">연결 확인 중</span>
+      </header>
+
+      <section class="workspace" aria-labelledby="captcha-heading">
+        <div class="section-heading">
+          <div>
+            <h2 id="captcha-heading">이미지 질문</h2>
+            <p id="instruction">이미지를 보고 질문에 답하세요.</p>
+          </div>
+          <button class="refresh-button" id="refresh" type="button">새 문제</button>
+        </div>
+
+        <div class="captcha-stage" id="captcha-stage" aria-live="polite">
+          <img class="background" id="background" alt="캡차 배경">
+          <img class="piece" id="piece" alt="드래그할 퍼즐 조각">
+          <button class="target-marker" id="target-marker" type="button" aria-label="기린 위로 드래그할 원" hidden>
+            <span aria-hidden="true"></span>
+          </button>
+          <div class="loading" id="loading">이미지를 준비하고 있습니다</div>
+        </div>
+
+        <form class="qa-form" id="qa-form" hidden>
+          <label class="question-label" for="answer-input" id="question-text"></label>
+          <div class="answer-row">
+            <input id="answer-input" type="number" min="0" max="99" inputmode="numeric" autocomplete="off" required aria-label="정답 숫자">
+            <button class="answer-button" type="submit">확인</button>
+          </div>
+        </form>
+
+        <div class="slider" id="slider">
+          <div class="slider-progress" id="slider-progress"></div>
+          <button class="slider-handle" id="slider-handle" type="button" aria-label="퍼즐 조각 드래그">
+            <span aria-hidden="true">|||</span>
+          </button>
+          <span class="slider-label" id="slider-label">오른쪽으로 밀어 맞추기</span>
+        </div>
+
+        <div class="result" id="result" hidden>
+          <span class="result-label">검증 토큰</span>
+          <code id="token"></code>
+        </div>
+      </section>
+    </main>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

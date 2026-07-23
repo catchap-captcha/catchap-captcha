@@ -1,0 +1,20 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Node
+node_modules/
+
+# Secrets / local env
+.env
+.env.local
+
+# Runtime data
+data/
+
+# OS / logs
+.DS_Store
+*.log
