@@ -17,6 +17,7 @@ APP_PORT=8000
 APP_SECRET={secrets.token_urlsafe(48)}
 CAPTCHA_SITE_KEY=site_{secrets.token_urlsafe(24)}
 CAPTCHA_SITE_SECRET=secret_{secrets.token_urlsafe(40)}
+CAPTCHA_ADMIN_KEY=admin_{secrets.token_urlsafe(32)}
 ALLOWED_ORIGINS=*
 TRUST_PROXY=false
 
