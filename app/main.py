@@ -17,7 +17,7 @@ from fastapi import FastAPI, Header, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from .config import ROOT_DIR, settings
 from .db import Database, utcnow
@@ -59,11 +59,20 @@ class SignupRequest(BaseModel):
 class ReviewObject(BaseModel):
     object_key: str
     label: str = "giraffe"
-    x: float = Field(ge=0, le=1)
-    y: float = Field(ge=0, le=1)
-    width: float = Field(gt=0, le=1)
-    height: float = Field(gt=0, le=1)
+    x: float
+    y: float
+    width: float
+    height: float
     role: Literal["target", "decoy", "ambiguous", "invalid"]
+
+    @field_validator("x", "y", "width", "height")
+    @classmethod
+    def _clamp_unit(cls, v: float, info) -> float:
+        # 자동 라벨링 데이터의 미세한 범위 밖 값(예: -0.003)을 거부하지 않고 [0,1]로 클램프한다.
+        v = min(max(float(v), 0.0), 1.0)
+        if info.field_name in ("width", "height") and v <= 0:
+            v = 1e-4
+        return v
 
 
 class ReviewRequest(BaseModel):
