@@ -401,4 +401,8 @@ if settings.static_dir.exists():
     @app.get("/{path:path}",include_in_schema=False)
     def frontend(path: str):
         candidate=settings.static_dir/path
-        return FileResponse(candidate if candidate.is_file() else settings.static_dir/"index.html")
+        if candidate.is_file():
+            return FileResponse(candidate)
+        # index.html은 캐시하지 않아 새 빌드(해시된 에셋)를 항상 즉시 반영한다.
+        return FileResponse(settings.static_dir/"index.html",
+                            headers={"Cache-Control":"no-cache, no-store, must-revalidate"})
