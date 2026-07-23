@@ -24,7 +24,7 @@ class Settings:
     )
     trust_proxy: bool = os.getenv("TRUST_PROXY", "false").lower() == "true"
     db_name: str = os.getenv("DB_NAME", "captcha_ms")
-    db_user: str = os.getenv("DB_USER", "ms")
+    db_user: str = os.getenv("DB_USER", "catchap_dba")
     db_password: str = os.getenv("DB_PASSWORD", "")
     db_unix_socket: str = os.getenv("DB_UNIX_SOCKET", "/var/run/mysqld/mysqld.sock")
     db_host: str = os.getenv("DB_HOST", "127.0.0.1")

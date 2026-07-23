@@ -21,7 +21,7 @@ ALLOWED_ORIGINS=*
 TRUST_PROXY=false
 
 DB_NAME=captcha_ms
-DB_USER=ms
+DB_USER=catchap_dba
 DB_PASSWORD=
 DB_UNIX_SOCKET=/var/run/mysqld/mysqld.sock
 DB_HOST=127.0.0.1
