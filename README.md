@@ -6,6 +6,7 @@ Visual Genome/TallyQA 기반의 다중 객체 직접 드래그 CAPTCHA입니다.
 
 - 문제 메타데이터와 bbox: MySQL `captcha_questions`, `captcha_objects`
 - 발급·시도·행동 요약·토큰: MySQL `captcha_challenges_v2`, `captcha_attempts`, `behavior_summaries`, `captcha_tokens`
+- 행동 AI shadow 결과: MySQL `behavior_shadow_predictions`
 - 최종 이미지·조각: `data/final/images`, `data/final/pieces`
 - 라벨링 큐·결과: `data/labeling`
 - 원시 행동 이벤트: `data/runtime/behavior-events/YYYY/MM/DD`
@@ -52,7 +53,34 @@ npm run build
 4. 성공 시 목적·세션에 묶인 1회용 토큰 발급
 5. `POST /api/signup`에서 토큰 소비 후 계정 생성
 
-원시 포인터 이벤트는 파일로, 행동 요약은 MySQL로 분리 저장합니다. 행동 점수는 현재 분석용이며 정답 판정을 변경하지 않습니다.
+원시 포인터 이벤트는 파일로, 행동 요약과 AI shadow 결과는 MySQL로 분리 저장합니다.
+
+## 행동 AI shadow 연동
+
+메인 CAPTCHA 서버는 정답을 직접 판정하고, 브라우저가 보낸 드래그 이벤트를 서버 간 호출로
+`sw` 행동 AI의 `POST /api/v1/behavior/predict`에 전달합니다. 정답 ID와 사용자가 고른 답은
+행동 AI에 보내지 않습니다.
+
+기본값 `BEHAVIOR_POLICY_MODE=shadow`에서는 행동 AI가 `step_up` 또는 `block`을 권고해도
+CAPTCHA의 통과/실패와 토큰 발급은 바뀌지 않습니다. 두 서비스의 shadow 결과가 각각 저장되어
+정상 사용자 오탐률을 먼저 확인할 수 있습니다.
+
+서버 환경 변수는 다음처럼 맞춥니다.
+
+```bash
+# ms CAPTCHA service
+BEHAVIOR_AI_URL=http://127.0.0.1:8010
+BEHAVIOR_AI_BACKEND_KEY=<sw의 CAPTCHA_BACKEND_API_KEY와 동일한 값>
+BEHAVIOR_POLICY_MODE=shadow
+
+# sw behavior service
+CAPTCHA_BACKEND_API_KEY=<동일한 비밀값>
+RISK_POLICY_MODE=shadow
+PRODUCTION_MODEL_DIR=/srv/catchap-behavior/models/candidate/revalidation_two_view_participant_safe_20260722
+```
+
+`BEHAVIOR_POLICY_MODE=active`와 `RISK_POLICY_MODE=active`가 **둘 다** 설정되기 전에는 AI 추천이
+캡차 결과를 바꾸지 않습니다. 활성화 전에는 메인 캡차 실제 궤적으로 임계값을 재보정해야 합니다.
 
 ## 운영 보안
 

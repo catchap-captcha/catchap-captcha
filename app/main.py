@@ -19,12 +19,23 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field
 
+from .behavior_client import (
+    BehaviorAIClient,
+    behavior_attempt_id,
+    build_predict_payload,
+    resolve_final_verdict,
+)
 from .config import ROOT_DIR, settings
 from .db import Database, utcnow
 
 
 database = Database(settings)
 settings.validate()
+behavior_ai = BehaviorAIClient(
+    settings.behavior_ai_url,
+    settings.behavior_ai_backend_key,
+    settings.behavior_ai_timeout_seconds,
+)
 
 
 class ChallengeCreate(BaseModel):
@@ -35,7 +46,7 @@ class ChallengeCreate(BaseModel):
 
 class BehaviorEvent(BaseModel):
     type: Literal["challenge_loaded", "object_enter", "object_leave", "pointer_down", "drag_start",
-                  "pointer_move", "drop", "selection_add", "object_removed", "submit", "verify_result"]
+                  "pointer_move", "pointer_cancel", "drop", "selection_add", "object_removed", "submit", "verify_result"]
     object_id: str | None = Field(default=None, max_length=64)
     x: float | None = Field(default=None, ge=0, le=1)
     y: float | None = Field(default=None, ge=0, le=1)
@@ -236,7 +247,12 @@ def live(): return {"status": "ok"}
 
 @app.get("/health/ready")
 def ready():
-    return {"status": "ok" if database.ping() else "error", "approved_questions": bool(database.active_question())}
+    return {
+        "status": "ok" if database.ping() else "error",
+        "approved_questions": bool(database.active_question()),
+        "behavior_policy_mode": settings.behavior_policy_mode,
+        "behavior_ai_configured": behavior_ai.enabled,
+    }
 
 
 @app.get("/api/config")
@@ -291,19 +307,53 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
     submitted=set(payload.selected_object_ids); targets={o["temporary_object_id"] for o in challenge["objects"] if o["role"]=="target"}
     valid={o["temporary_object_id"] for o in challenge["objects"]}; correct=submitted==targets and submitted <= valid
     reason=None if correct else ("unknown_object" if not submitted<=valid else "incorrect_selection")
+    question = database.get_question(challenge["question_id"])
+    if question is None:
+        raise HTTPException(404, "Question not found")
+
+    behavior_id = behavior_attempt_id(challenge_id, int(challenge["attempt_count"]) + 1)
+    predict_payload, predict_reason = build_predict_payload(
+        attempt_id=behavior_id,
+        challenge_id=challenge_id,
+        session_id=payload.session_id,
+        events=payload.events,
+        width=int(question["image_width"]),
+        height=int(question["image_height"]),
+        retry_count=int(challenge["attempt_count"]),
+    )
+    prediction = behavior_ai.score(predict_payload, behavior_id, predict_reason)
+    main_verdict = "passed" if correct else "failed"
+    final_verdict, enforced_action = resolve_final_verdict(
+        captcha_correct=correct,
+        prediction=prediction,
+        local_policy_mode=settings.behavior_policy_mode,
+    )
+
     current_ip_hash=hash_value(client_ip(request)); pattern=database.request_pattern(payload.session_id,current_ip_hash)
     summary=summarize(payload.events,submitted,targets,payload.duration_ms,correct,pattern,
                       current_ip_hash!=challenge["client_ip_hash"])
     event_dir=settings.runtime_dir/"behavior-events"/utcnow().strftime("%Y/%m/%d"); event_dir.mkdir(parents=True,exist_ok=True)
     event_file=event_dir/f"{challenge_id}-{challenge['attempt_count']+1}.json"
-    event_file.write_text(json.dumps({"challenge_id":challenge_id,"events":[e.model_dump() for e in payload.events],
-        "answer_correct":correct,"behavior_summary":summary},ensure_ascii=False),encoding="utf-8")
-    database.record_attempt(challenge_id,list(submitted),correct,reason,payload.duration_ms,summary,str(event_file.relative_to(ROOT_DIR)))
+    event_file.write_text(json.dumps({"challenge_id":challenge_id,"behavior_attempt_id":behavior_id,
+        "events":[e.model_dump() for e in payload.events],"answer_correct":correct,
+        "behavior_summary":summary},ensure_ascii=False),encoding="utf-8")
+    captcha_attempt_id = database.record_attempt(
+        challenge_id, list(submitted), correct, reason, payload.duration_ms, summary,
+        str(event_file.relative_to(ROOT_DIR)),
+    )
+    database.record_behavior_shadow_prediction(
+        captcha_attempt_id, prediction, settings.behavior_policy_mode, main_verdict, final_verdict,
+    )
+    if settings.behavior_policy_mode == "shadow":
+        # This request proves in the behavior-service DB that its recommendation
+        # did not alter the main CAPTCHA result.
+        prediction = behavior_ai.record_shadow_outcome(prediction, main_verdict)
+
     if not correct: return {"success":False,"remaining_attempts":max(0,settings.max_attempts-challenge["attempt_count"]-1)}
-    if summary["risk_score"]>=settings.behavior_block_score:
-        return {"success":False,"blocked":True,"risk_level":summary["risk_level"]}
-    if summary["risk_score"]>=settings.behavior_step_up_score:
-        return {"success":False,"step_up":True,"risk_level":summary["risk_level"]}
+    if enforced_action == "step_up_and_rate_limit":
+        return {"success":False,"blocked":True,"risk_level":prediction.risk_level}
+    if enforced_action == "step_up":
+        return {"success":False,"step_up":True,"risk_level":prediction.risk_level}
     token=secrets.token_urlsafe(32); database.create_token(challenge_id,hash_value(token),challenge["purpose"],payload.session_id,
                                                          utcnow()+timedelta(seconds=settings.verification_ttl_seconds))
     return {"success":True,"captcha_token":token,"expires_in":settings.verification_ttl_seconds}

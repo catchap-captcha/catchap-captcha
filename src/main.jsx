@@ -70,6 +70,10 @@ function CaptchaApp() {
     }
     setDragging(null); setDragPoint(null);
   };
+  const cancelDrag = (event) => {
+    if (dragging) record("pointer_cancel", dragging.object_id, event);
+    setDragging(null); setDragPoint(null);
+  };
   const remove = (id) => { setSelected((rows) => rows.filter((value) => value !== id)); record("object_removed", id); };
   const clearAll = () => { selected.forEach((id) => record("object_removed", id)); setSelected([]); };
   const verify = async () => {
@@ -107,7 +111,7 @@ function CaptchaApp() {
 
       {challenge && <div className="cc-main">
         <div className="cc-rowhead"><span className="cc-tag">문제</span><button className="cc-link" onClick={load}>문제 바꾸기</button></div>
-        <div className="cc-stage" ref={stageRef} onPointerMove={moveDrag} onPointerUp={drop} onPointerCancel={()=>{setDragging(null);setDragPoint(null);}}>
+        <div className="cc-stage" ref={stageRef} onPointerMove={moveDrag} onPointerUp={drop} onPointerCancel={cancelDrag}>
           <img src={challenge.image_url} alt="CAPTCHA 원본 장면" draggable="false" />
           {challenge.objects.filter((obj) => !selected.includes(obj.object_id)).map((obj) => <button key={obj.object_id} className="hit-object"
             style={{ left:`${obj.hit_region[0]*100}%`,top:`${obj.hit_region[1]*100}%`,width:`${obj.hit_region[2]*100}%`,height:`${obj.hit_region[3]*100}%` }}

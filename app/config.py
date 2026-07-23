@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Literal
 from pathlib import Path
 
 
@@ -33,14 +34,22 @@ class Settings:
     verification_ttl_seconds: int = int(os.getenv("VERIFICATION_TTL_SECONDS", "300"))
     max_attempts: int = int(os.getenv("MAX_ATTEMPTS", "3"))
     max_challenges_per_minute: int = int(os.getenv("MAX_CHALLENGES_PER_MINUTE", "30"))
-    behavior_step_up_score: int = int(os.getenv("BEHAVIOR_STEP_UP_SCORE", "30"))
-    behavior_block_score: int = int(os.getenv("BEHAVIOR_BLOCK_SCORE", "80"))
+    # The behavior model runs as a separate internal service. Browser clients
+    # never receive this key and cannot call the model directly.
+    behavior_ai_url: str = os.getenv("BEHAVIOR_AI_URL", "")
+    behavior_ai_backend_key: str = os.getenv("BEHAVIOR_AI_BACKEND_KEY", "")
+    behavior_ai_timeout_seconds: float = float(os.getenv("BEHAVIOR_AI_TIMEOUT_SECONDS", "1.5"))
+    # Shadow is deliberately the default. A CAPTCHA answer stays authoritative
+    # until real main-CAPTCHA data has calibrated the model and thresholds.
+    behavior_policy_mode: Literal["shadow", "active"] = os.getenv("BEHAVIOR_POLICY_MODE", "shadow")  # type: ignore[assignment]
     final_dir: Path = path_setting("FINAL_DIR", "data/final")
     labeling_dir: Path = path_setting("LABELING_DIR", "data/labeling")
     runtime_dir: Path = path_setting("RUNTIME_DIR", "data/runtime")
     static_dir: Path = path_setting("STATIC_DIR", "static/dist")
 
     def validate(self) -> None:
+        if self.behavior_policy_mode not in {"shadow", "active"}:
+            raise RuntimeError("BEHAVIOR_POLICY_MODE must be shadow or active")
         if os.getenv("APP_ENV", "development") == "production":
             for name, value in {
                 "APP_SECRET": self.app_secret,

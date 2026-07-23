@@ -63,6 +63,20 @@ SCHEMA = [
       path_curvature DOUBLE NOT NULL, pause_count INT UNSIGNED NOT NULL,
       CONSTRAINT fk_summary_attempt FOREIGN KEY(attempt_id) REFERENCES captcha_attempts(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+    """CREATE TABLE IF NOT EXISTS behavior_shadow_predictions (
+      captcha_attempt_id BIGINT UNSIGNED PRIMARY KEY,
+      behavior_attempt_id VARCHAR(64) NOT NULL UNIQUE,
+      status VARCHAR(16) NOT NULL, detail VARCHAR(500) NULL,
+      local_policy_mode VARCHAR(16) NOT NULL, model_policy_mode VARCHAR(16) NULL,
+      risk_score DOUBLE NULL, risk_level VARCHAR(16) NULL, recommended_action VARCHAR(32) NULL,
+      human_score DOUBLE NULL, bot_risk_score DOUBLE NULL,
+      model_name VARCHAR(128) NULL, model_version VARCHAR(128) NULL,
+      feature_schema_version VARCHAR(32) NULL, reasons JSON NULL,
+      main_captcha_verdict VARCHAR(16) NOT NULL, final_verdict VARCHAR(16) NOT NULL,
+      created_at DATETIME(6) NOT NULL,
+      CONSTRAINT fk_shadow_prediction_attempt FOREIGN KEY(captcha_attempt_id)
+        REFERENCES captcha_attempts(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
     """CREATE TABLE IF NOT EXISTS captcha_tokens (
       id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, challenge_id CHAR(36) NOT NULL,
       token_hash CHAR(64) NOT NULL UNIQUE, purpose VARCHAR(32) NOT NULL,
@@ -179,6 +193,39 @@ class Database:
             cur.execute("UPDATE captcha_challenges_v2 SET attempt_count=attempt_count+1,status=%s,verified_at=%s WHERE id=%s",
                         ("passed" if correct else "failed", utcnow() if correct else None, challenge_id))
             conn.commit(); return int(attempt_id)
+
+    def record_behavior_shadow_prediction(
+        self,
+        captcha_attempt_id: int,
+        prediction: Any,
+        local_policy_mode: str,
+        main_captcha_verdict: str,
+        final_verdict: str,
+    ) -> None:
+        """Persist AI output beside the local attempt without storing answers."""
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO behavior_shadow_predictions(
+                  captcha_attempt_id,behavior_attempt_id,status,detail,local_policy_mode,model_policy_mode,
+                  risk_score,risk_level,recommended_action,human_score,bot_risk_score,model_name,model_version,
+                  feature_schema_version,reasons,main_captcha_verdict,final_verdict,created_at)
+                  VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                  ON DUPLICATE KEY UPDATE status=VALUES(status),detail=VALUES(detail),
+                  model_policy_mode=VALUES(model_policy_mode),risk_score=VALUES(risk_score),
+                  risk_level=VALUES(risk_level),recommended_action=VALUES(recommended_action),
+                  human_score=VALUES(human_score),bot_risk_score=VALUES(bot_risk_score),
+                  model_name=VALUES(model_name),model_version=VALUES(model_version),
+                  feature_schema_version=VALUES(feature_schema_version),reasons=VALUES(reasons),
+                  main_captcha_verdict=VALUES(main_captcha_verdict),final_verdict=VALUES(final_verdict)""",
+                (
+                    captcha_attempt_id, prediction.attempt_id, prediction.status, prediction.detail,
+                    local_policy_mode, prediction.policy_mode, prediction.risk_score, prediction.risk_level,
+                    prediction.recommended_action, prediction.human_score, prediction.bot_risk_score,
+                    prediction.model_name, prediction.model_version, prediction.feature_schema_version,
+                    json.dumps(list(prediction.reasons)), main_captcha_verdict, final_verdict, utcnow(),
+                ),
+            )
+            conn.commit()
 
     def create_token(self, challenge_id: str, token_hash: str, purpose: str, session_id: str, expires_at: datetime) -> None:
         with self.connection() as conn, conn.cursor() as cur:
