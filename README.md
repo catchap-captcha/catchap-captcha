@@ -7,6 +7,7 @@ Visual Genome/TallyQA 기반의 다중 객체 직접 드래그 CAPTCHA입니다.
 - 문제 메타데이터와 bbox: MySQL `captcha_questions`, `captcha_objects`
 - 발급·시도·행동 요약·토큰: MySQL `captcha_challenges_v2`, `captcha_attempts`, `behavior_summaries`, `captcha_tokens`
 - 행동 AI shadow 결과: MySQL `behavior_shadow_predictions`
+- 서버 검증 행동 배치: MySQL `captcha_behavior_sessions`, `captcha_behavior_batches`
 - 최종 이미지·조각: `data/final/images`, `data/final/pieces`
 - 라벨링 큐·결과: `data/labeling`
 - 원시 행동 이벤트: `data/runtime/behavior-events/YYYY/MM/DD`
@@ -49,9 +50,10 @@ npm run build
 
 1. `POST /api/captcha/challenges`
 2. 객체를 정답존에 드래그
-3. `POST /api/captcha/challenges/{id}/verify`
-4. 성공 시 목적·세션에 묶인 1회용 토큰 발급
-5. `POST /api/signup`에서 토큰 소비 후 계정 생성
+3. 활성화 시 200ms 이하 단위로 `POST /api/captcha/challenges/{id}/behavior-batches`
+4. `POST /api/captcha/challenges/{id}/verify`
+5. 성공 시 목적·세션에 묶인 1회용 토큰 발급
+6. `POST /api/signup`에서 토큰 소비 후 계정 생성
 
 원시 포인터 이벤트는 파일로, 행동 요약과 AI shadow 결과는 MySQL로 분리 저장합니다.
 
@@ -81,6 +83,24 @@ PRODUCTION_MODEL_DIR=/srv/catchap-behavior/models/candidate/revalidation_two_vie
 
 `BEHAVIOR_POLICY_MODE=active`와 `RISK_POLICY_MODE=active`가 **둘 다** 설정되기 전에는 AI 추천이
 캡차 결과를 바꾸지 않습니다. 활성화 전에는 메인 캡차 실제 궤적으로 임계값을 재보정해야 합니다.
+
+### 새 VPC 배포용 이벤트 전송 모드
+
+`BEHAVIOR_EVENT_TRANSPORT`는 AI 모델 정책과 별개로 브라우저 이벤트의 전송 방식을 정합니다.
+
+- `off` (기본): 기존 CAPTCHA만 동작합니다. 테스트 서버나 아직 통합되지 않은 프론트에 안전합니다.
+- `shadow`: challenge별 nonce, 이벤트 순번, 이전 배치 영수증 해시를 사용해 이벤트를 서버에 저장하고 AI 점수만 기록합니다. CAPTCHA 통과 여부는 바꾸지 않습니다.
+- `active`: `shadow`와 같은 서버 수집을 사용하며, 누락되거나 무결성이 깨진 행동 데이터는 `step_up`으로 처리합니다.
+
+새 프라이빗 VPC에서는 `shadow`로 먼저 올립니다. CAPTCHA 서버는 브라우저가 접근하는 공개 진입점 뒤에 두고, `BEHAVIOR_AI_URL`과 MySQL은 VPC 내부 주소만 사용합니다. 준비 확인은 다음 순서로 합니다.
+
+```bash
+npm ci && npm run build
+.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+BEHAVIOR_EVENT_TRANSPORT=shadow .venv/bin/python scripts/smoke_behavior_batches.py
+```
+
+위 smoke test가 통과한 뒤 실제 사용자 shadow 로그로 오탐률을 확인하고, 그 다음에만 `BEHAVIOR_EVENT_TRANSPORT=active`와 양쪽 AI 정책 `active`를 함께 검토합니다.
 
 ## 운영 보안
 

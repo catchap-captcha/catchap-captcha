@@ -21,6 +21,7 @@ from pydantic import BaseModel, EmailStr, Field
 
 from .behavior_client import (
     BehaviorAIClient,
+    BehaviorPrediction,
     behavior_attempt_id,
     build_predict_payload,
     resolve_final_verdict,
@@ -51,6 +52,18 @@ class BehaviorEvent(BaseModel):
     x: float | None = Field(default=None, ge=0, le=1)
     y: float | None = Field(default=None, ge=0, le=1)
     timestamp_ms: int = Field(ge=0)
+
+
+class BehaviorBatchEvent(BehaviorEvent):
+    seq: int = Field(ge=0)
+
+
+class BehaviorBatchRequest(BaseModel):
+    session_id: str = Field(min_length=8, max_length=128)
+    nonce: str = Field(min_length=24, max_length=128)
+    batch_seq: int = Field(ge=0, le=64)
+    previous_receipt: str | None = Field(default=None, min_length=64, max_length=64)
+    events: list[BehaviorBatchEvent] = Field(min_length=1, max_length=32)
 
 
 class VerifyRequest(BaseModel):
@@ -251,6 +264,7 @@ def ready():
         "status": "ok" if database.ping() else "error",
         "approved_questions": bool(database.active_question()),
         "behavior_policy_mode": settings.behavior_policy_mode,
+        "behavior_event_transport": settings.behavior_event_transport,
         "behavior_ai_configured": behavior_ai.enabled,
     }
 
@@ -268,18 +282,24 @@ def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_
     question = database.active_question()
     if not question: raise HTTPException(503, "No approved CAPTCHA questions")
     challenge_id = str(uuid.uuid4()); now = utcnow(); expires = now + timedelta(seconds=settings.challenge_ttl_seconds)
+    behavior_nonce = secrets.token_urlsafe(24)
     mappings = [(obj["id"], f"tmp_{secrets.token_urlsafe(8)}") for obj in question["objects"] if obj["role"] != "invalid"]
     temporary = {object_id: temp for object_id, temp in mappings}
     database.create_challenge({"id":challenge_id,"question_id":question["id"],"session_id":payload.session_id,
-        "purpose":payload.purpose,"expires_at":expires,"created_at":now,"client_ip_hash":ip_hash}, mappings)
+        "purpose":payload.purpose,"expires_at":expires,"created_at":now,"client_ip_hash":ip_hash}, mappings, behavior_nonce)
     objects = [{"object_id":temporary[obj["id"]], "hit_region":[obj["bbox_x"],obj["bbox_y"],obj["bbox_width"],obj["bbox_height"]],
                 "preview_url":f"/api/captcha/assets/{challenge_id}/{temporary[obj['id']]}"}
                for obj in question["objects"] if obj["id"] in temporary]
     secrets.SystemRandom().shuffle(objects)
-    return {"challenge_id":challenge_id,"type":"object_drag","instruction":question["instruction_ko"],
+    response = {"challenge_id":challenge_id,"type":"object_drag","instruction":question["instruction_ko"],
             "image_url":f"/api/captcha/assets/{challenge_id}/image","width":question["image_width"],
             "height":question["image_height"],"objects":objects,
-            "drop_zone":{"x":0.72,"y":0.68,"width":0.25,"height":0.25},"expires_at":expires.isoformat()+"Z"}
+            "drop_zone":{"x":0.72,"y":0.68,"width":0.25,"height":0.25},"expires_at":expires.isoformat()+"Z",
+            "behavior_event_transport":settings.behavior_event_transport,
+            "behavior_batch_interval_ms":200,"behavior_batch_max_events":32}
+    if settings.behavior_event_transport != "off":
+        response["behavior_nonce"] = behavior_nonce
+    return response
 
 
 @app.get("/api/captcha/assets/{challenge_id}/{asset_id}")
@@ -295,14 +315,49 @@ def challenge_asset(challenge_id: str, asset_id: str):
     return FileResponse(safe_asset(settings.final_dir, mapping["piece_path"]))
 
 
+@app.post("/api/captcha/challenges/{challenge_id}/behavior-batches")
+def collect_behavior_batch(
+    challenge_id: str,
+    payload: BehaviorBatchRequest,
+    x_captcha_site_key: str | None = Header(None),
+):
+    """Store a short behavior batch before answer verification.
+
+    ``nonce`` and the receipt chain bind batches to one issued challenge. The
+    final verify endpoint deliberately scores only these server-side records.
+    """
+    require_header(x_captcha_site_key, settings.site_key, "Invalid site key")
+    if settings.behavior_event_transport == "off":
+        raise HTTPException(409, "behavior_transport_disabled")
+    challenge = database.challenge_for_verify(challenge_id)
+    if not challenge or challenge["session_id"] != payload.session_id:
+        raise HTTPException(404, "Challenge not found")
+    if challenge["status"] != "issued" or challenge["expires_at"] <= utcnow():
+        raise HTTPException(409, "Challenge is no longer active")
+    try:
+        receipt = database.append_behavior_batch(
+            challenge_id=challenge_id,
+            nonce=payload.nonce,
+            batch_seq=payload.batch_seq,
+            previous_receipt=payload.previous_receipt,
+            events=[event.model_dump() for event in payload.events],
+        )
+    except ValueError as error:
+        detail = str(error)
+        status_code = 403 if detail == "behavior_nonce_invalid" else 409
+        raise HTTPException(status_code, detail) from error
+    return {"accepted": True, **receipt}
+
+
 @app.post("/api/captcha/challenges/{challenge_id}/verify")
 def verify(challenge_id: str, payload: VerifyRequest, request: Request,
            x_captcha_site_key: str | None = Header(None)):
     require_header(x_captcha_site_key, settings.site_key, "Invalid site key")
+    verify_received_at = utcnow()
     challenge = database.challenge_for_verify(challenge_id)
     if not challenge or challenge["session_id"] != payload.session_id: raise HTTPException(404, "Challenge not found")
     if challenge["status"] == "passed": raise HTTPException(409, "Challenge already used")
-    if challenge["expires_at"] <= utcnow(): raise HTTPException(410, "Challenge expired")
+    if challenge["expires_at"] <= verify_received_at: raise HTTPException(410, "Challenge expired")
     if challenge["attempt_count"] >= settings.max_attempts: raise HTTPException(429, "No attempts remaining")
     submitted=set(payload.selected_object_ids); targets={o["temporary_object_id"] for o in challenge["objects"] if o["role"]=="target"}
     valid={o["temporary_object_id"] for o in challenge["objects"]}; correct=submitted==targets and submitted <= valid
@@ -312,16 +367,25 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
         raise HTTPException(404, "Question not found")
 
     behavior_id = behavior_attempt_id(challenge_id, int(challenge["attempt_count"]) + 1)
-    predict_payload, predict_reason = build_predict_payload(
-        attempt_id=behavior_id,
-        challenge_id=challenge_id,
-        session_id=payload.session_id,
-        events=payload.events,
-        width=int(question["image_width"]),
-        height=int(question["image_height"]),
-        retry_count=int(challenge["attempt_count"]),
-    )
-    prediction = behavior_ai.score(predict_payload, behavior_id, predict_reason)
+    if settings.behavior_event_transport == "off":
+        server_events, telemetry_reason = [], None
+        prediction = BehaviorPrediction(behavior_id, "disabled", "behavior_transport_off")
+    else:
+        server_events, telemetry_reason = database.trusted_behavior_events(challenge_id)
+        predict_payload, predict_reason = build_predict_payload(
+            attempt_id=behavior_id,
+            challenge_id=challenge_id,
+            session_id=payload.session_id,
+            events=server_events,
+            width=int(question["image_width"]),
+            height=int(question["image_height"]),
+            retry_count=int(challenge["attempt_count"]),
+            presented_at=challenge.get("created_at"),
+            submitted_at=verify_received_at,
+        )
+        if telemetry_reason:
+            predict_payload, predict_reason = None, telemetry_reason
+        prediction = behavior_ai.score(predict_payload, behavior_id, predict_reason)
     main_verdict = "passed" if correct else "failed"
     final_verdict, enforced_action = resolve_final_verdict(
         captcha_correct=correct,
@@ -329,13 +393,19 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
         local_policy_mode=settings.behavior_policy_mode,
     )
 
+    # During shadow rollout we retain the CAPTCHA outcome but record the
+    # missing/invalid telemetry. In active mode it must receive a step-up.
+    if correct and telemetry_reason and settings.behavior_event_transport == "active":
+        final_verdict, enforced_action = "failed", "step_up"
+
     current_ip_hash=hash_value(client_ip(request)); pattern=database.request_pattern(payload.session_id,current_ip_hash)
-    summary=summarize(payload.events,submitted,targets,payload.duration_ms,correct,pattern,
+    summary=summarize(server_events,submitted,targets,payload.duration_ms,correct,pattern,
                       current_ip_hash!=challenge["client_ip_hash"])
     event_dir=settings.runtime_dir/"behavior-events"/utcnow().strftime("%Y/%m/%d"); event_dir.mkdir(parents=True,exist_ok=True)
     event_file=event_dir/f"{challenge_id}-{challenge['attempt_count']+1}.json"
     event_file.write_text(json.dumps({"challenge_id":challenge_id,"behavior_attempt_id":behavior_id,
-        "events":[e.model_dump() for e in payload.events],"answer_correct":correct,
+        "events":server_events,"telemetry_reason":telemetry_reason,
+        "submitted_browser_event_count":len(payload.events),"answer_correct":correct,
         "behavior_summary":summary},ensure_ascii=False),encoding="utf-8")
     captcha_attempt_id = database.record_attempt(
         challenge_id, list(submitted), correct, reason, payload.duration_ms, summary,

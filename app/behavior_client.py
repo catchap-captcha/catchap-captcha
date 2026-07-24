@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Callable, Iterable, Literal
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -131,8 +132,15 @@ def build_predict_payload(
     width: int,
     height: int,
     retry_count: int,
+    presented_at: datetime | None = None,
+    submitted_at: datetime | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """Return a behavior-service request without answer semantics or IDs."""
+    """Return a behavior request without answer semantics or object IDs.
+
+    Pointer events originate in the browser and remain untrusted. The optional
+    timing values are supplied by the CAPTCHA server so the behavior service
+    can reject telemetry that falls outside the challenge lifecycle.
+    """
     pointer_events, counters = adapt_events(events, width, height)
     if len(pointer_events) < 2:
         return None, "insufficient_pointer_events"
@@ -144,6 +152,10 @@ def build_predict_payload(
             "challenge_id": challenge_id,
             "session_id": _bounded_session_id(session_id),
             "captcha": {"width": width, "height": height},
+            "timing": {
+                "presented_at": presented_at.isoformat() if presented_at else None,
+                "submitted_at": submitted_at.isoformat() if submitted_at else None,
+            },
             "events": pointer_events,
             "interaction": {
                 "regrab_count": max(0, counters["drag_start_count"] - counters["selection_count"]),

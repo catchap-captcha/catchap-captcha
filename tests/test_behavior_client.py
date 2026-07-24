@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from app.behavior_client import (
     BehaviorAIClient,
@@ -37,6 +38,8 @@ def test_adapter_maps_pointer_events_without_duplicate_drag_start():
 
 
 def test_predict_payload_excludes_answer_semantics_and_tracks_interaction():
+    presented_at = datetime(2026, 7, 23, 7, 0, tzinfo=timezone.utc)
+    submitted_at = datetime(2026, 7, 23, 7, 0, 5, tzinfo=timezone.utc)
     payload, reason = build_predict_payload(
         attempt_id="ms-challenge-a1",
         challenge_id="challenge",
@@ -45,6 +48,8 @@ def test_predict_payload_excludes_answer_semantics_and_tracks_interaction():
         width=800,
         height=600,
         retry_count=2,
+        presented_at=presented_at,
+        submitted_at=submitted_at,
     )
 
     assert reason is None
@@ -56,6 +61,10 @@ def test_predict_payload_excludes_answer_semantics_and_tracks_interaction():
         "pointercancel_count": 0,
         "empty_click_count": 0,
         "failed_drop_count": 0,
+    }
+    assert payload["timing"] == {
+        "presented_at": "2026-07-23T07:00:00+00:00",
+        "submitted_at": "2026-07-23T07:00:05+00:00",
     }
     assert "selected_object_ids" not in json.dumps(payload)
 

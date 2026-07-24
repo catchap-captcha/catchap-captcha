@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -46,6 +48,24 @@ SCHEMA = [
       PRIMARY KEY(challenge_id, temporary_object_id), UNIQUE KEY uq_challenge_object(challenge_id, object_id),
       CONSTRAINT fk_map_challenge FOREIGN KEY(challenge_id) REFERENCES captcha_challenges_v2(id) ON DELETE CASCADE,
       CONSTRAINT fk_map_object FOREIGN KEY(object_id) REFERENCES captcha_objects(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+    """CREATE TABLE IF NOT EXISTS captcha_behavior_sessions (
+      challenge_id CHAR(36) PRIMARY KEY, nonce_hash CHAR(64) NOT NULL,
+      next_batch_seq INT UNSIGNED NOT NULL DEFAULT 0, last_receipt_hash CHAR(64) NULL,
+      received_event_count INT UNSIGNED NOT NULL DEFAULT 0, created_at DATETIME(6) NOT NULL,
+      CONSTRAINT fk_behavior_session_challenge FOREIGN KEY(challenge_id)
+        REFERENCES captcha_challenges_v2(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+    """CREATE TABLE IF NOT EXISTS captcha_behavior_batches (
+      id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, challenge_id CHAR(36) NOT NULL,
+      batch_seq INT UNSIGNED NOT NULL, event_count SMALLINT UNSIGNED NOT NULL,
+      previous_receipt_hash CHAR(64) NULL, payload_hash CHAR(64) NOT NULL,
+      receipt_hash CHAR(64) NOT NULL, events_json JSON NOT NULL,
+      received_at DATETIME(6) NOT NULL,
+      UNIQUE KEY uq_behavior_batch(challenge_id, batch_seq),
+      INDEX idx_behavior_batch_challenge(challenge_id, batch_seq),
+      CONSTRAINT fk_behavior_batch_challenge FOREIGN KEY(challenge_id)
+        REFERENCES captcha_challenges_v2(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
     """CREATE TABLE IF NOT EXISTS captcha_attempts (
       id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, challenge_id CHAR(36) NOT NULL,
@@ -95,6 +115,86 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
+def _json_bytes(value: Any) -> bytes:
+    """Return a stable representation used for server-side batch receipts."""
+    return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _payload_hash(events: list[dict[str, Any]]) -> str:
+    return hashlib.sha256(_json_bytes(events)).hexdigest()
+
+
+def _receipt_timestamp(value: datetime) -> str:
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def _receipt_hash(
+    challenge_id: str,
+    batch_seq: int,
+    previous_receipt_hash: str | None,
+    payload_hash: str,
+    received_at: datetime,
+) -> str:
+    material = "|".join(
+        (challenge_id, str(batch_seq), previous_receipt_hash or "", payload_hash, _receipt_timestamp(received_at))
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def _decode_json(value: Any) -> Any:
+    if isinstance(value, (str, bytes, bytearray)):
+        return json.loads(value)
+    return value
+
+
+def _validate_behavior_batches(
+    challenge_id: str,
+    session: dict[str, Any],
+    rows: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Validate the persisted receipt chain without trusting browser input."""
+    expected_previous: str | None = None
+    events: list[dict[str, Any]] = []
+    expected_event_seq = 0
+    for expected_seq, row in enumerate(rows):
+        if int(row["batch_seq"]) != expected_seq:
+            return [], "behavior_batch_sequence_invalid"
+        batch_events = _decode_json(row["events_json"])
+        if not isinstance(batch_events, list) or len(batch_events) != int(row["event_count"]):
+            return [], "behavior_batch_event_count_invalid"
+        for offset, event in enumerate(batch_events):
+            if not isinstance(event, dict) or int(event.get("seq", -1)) != expected_event_seq + offset:
+                return [], "behavior_event_sequence_invalid"
+        if not hmac.compare_digest(_payload_hash(batch_events), row["payload_hash"]):
+            return [], "behavior_batch_payload_invalid"
+        if not hmac.compare_digest(row["previous_receipt_hash"] or "", expected_previous or ""):
+            return [], "behavior_receipt_chain_invalid"
+        expected_receipt = _receipt_hash(
+            challenge_id,
+            expected_seq,
+            expected_previous,
+            row["payload_hash"],
+            row["received_at"],
+        )
+        if not hmac.compare_digest(expected_receipt, row["receipt_hash"]):
+            return [], "behavior_receipt_invalid"
+        expected_previous = row["receipt_hash"]
+        events.extend(batch_events)
+        expected_event_seq += len(batch_events)
+
+    if int(session["next_batch_seq"]) != len(rows):
+        return [], "behavior_batch_count_invalid"
+    if not hmac.compare_digest(session["last_receipt_hash"] or "", expected_previous or ""):
+        return [], "behavior_session_receipt_invalid"
+    if int(session["received_event_count"]) != expected_event_seq:
+        return [], "behavior_session_event_count_invalid"
+    if not events:
+        return [], "behavior_batches_missing"
+    return events, None
+
+
 class Database:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -137,7 +237,7 @@ class Database:
             cur.execute("SELECT * FROM captcha_objects WHERE question_id=%s ORDER BY id", (question["id"],))
             question["objects"] = cur.fetchall(); return question
 
-    def create_challenge(self, challenge: dict[str, Any], mappings: list[tuple[int, str]]) -> None:
+    def create_challenge(self, challenge: dict[str, Any], mappings: list[tuple[int, str]], behavior_nonce: str) -> None:
         with self.connection() as conn, conn.cursor() as cur:
             cur.execute("""INSERT INTO captcha_challenges_v2
               (id,question_id,session_id,purpose,expires_at,status,created_at,client_ip_hash)
@@ -145,6 +245,11 @@ class Database:
               tuple(challenge[k] for k in ("id","question_id","session_id","purpose","expires_at","created_at","client_ip_hash")))
             cur.executemany("INSERT INTO captcha_challenge_objects(challenge_id,object_id,temporary_object_id) VALUES(%s,%s,%s)",
                             [(challenge["id"], object_id, temporary) for object_id, temporary in mappings])
+            cur.execute(
+                """INSERT INTO captcha_behavior_sessions(challenge_id,nonce_hash,created_at)
+                VALUES(%s,%s,%s)""",
+                (challenge["id"], hashlib.sha256(behavior_nonce.encode("utf-8")).hexdigest(), challenge["created_at"]),
+            )
             conn.commit()
 
     def request_pattern(self, session_id: str, client_ip_hash: str) -> dict[str, int]:
@@ -170,6 +275,107 @@ class Database:
             cur.execute("""SELECT m.temporary_object_id,m.object_id,o.role,o.piece_path FROM captcha_challenge_objects m
               JOIN captcha_objects o ON o.id=m.object_id WHERE m.challenge_id=%s""", (challenge_id,))
             challenge["objects"] = cur.fetchall(); return challenge
+
+    def append_behavior_batch(
+        self,
+        *,
+        challenge_id: str,
+        nonce: str,
+        batch_seq: int,
+        previous_receipt: str | None,
+        events: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Append one browser batch and return a retry-safe server receipt.
+
+        The browser never chooses a receipt or a receive time. A lost HTTP
+        response can safely retry the exact same batch sequence and payload.
+        """
+        payload_hash = _payload_hash(events)
+        nonce_hash = hashlib.sha256(nonce.encode("utf-8")).hexdigest()
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT nonce_hash,next_batch_seq,last_receipt_hash,received_event_count FROM captcha_behavior_sessions
+                WHERE challenge_id=%s FOR UPDATE""",
+                (challenge_id,),
+            )
+            session = cur.fetchone()
+            if not session:
+                raise ValueError("behavior_session_missing")
+            if not hmac.compare_digest(session["nonce_hash"], nonce_hash):
+                raise ValueError("behavior_nonce_invalid")
+
+            cur.execute(
+                """SELECT payload_hash,receipt_hash,received_at FROM captcha_behavior_batches
+                WHERE challenge_id=%s AND batch_seq=%s""",
+                (challenge_id, batch_seq),
+            )
+            existing = cur.fetchone()
+            if existing:
+                if not hmac.compare_digest(existing["payload_hash"], payload_hash):
+                    raise ValueError("behavior_batch_conflict")
+                conn.commit()
+                return {
+                    "receipt": existing["receipt_hash"],
+                    "server_received_at": _receipt_timestamp(existing["received_at"]),
+                    "duplicate": True,
+                }
+
+            if batch_seq != int(session["next_batch_seq"]):
+                raise ValueError("behavior_batch_out_of_order")
+            expected_event_seq = int(session["received_event_count"])
+            for offset, event in enumerate(events):
+                if int(event.get("seq", -1)) != expected_event_seq + offset:
+                    raise ValueError("behavior_event_sequence_invalid")
+            expected_previous = session["last_receipt_hash"]
+            if not hmac.compare_digest(previous_receipt or "", expected_previous or ""):
+                raise ValueError("behavior_receipt_chain_invalid")
+
+            received_at = utcnow()
+            receipt = _receipt_hash(challenge_id, batch_seq, expected_previous, payload_hash, received_at)
+            cur.execute(
+                """INSERT INTO captcha_behavior_batches(
+                  challenge_id,batch_seq,event_count,previous_receipt_hash,payload_hash,receipt_hash,events_json,received_at
+                ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (
+                    challenge_id,
+                    batch_seq,
+                    len(events),
+                    expected_previous,
+                    payload_hash,
+                    receipt,
+                    json.dumps(events, ensure_ascii=False, separators=(",", ":")),
+                    received_at,
+                ),
+            )
+            cur.execute(
+                """UPDATE captcha_behavior_sessions
+                SET next_batch_seq=next_batch_seq+1,last_receipt_hash=%s,
+                    received_event_count=received_event_count+%s
+                WHERE challenge_id=%s""",
+                (receipt, len(events), challenge_id),
+            )
+            conn.commit()
+        return {"receipt": receipt, "server_received_at": _receipt_timestamp(received_at), "duplicate": False}
+
+    def trusted_behavior_events(self, challenge_id: str) -> tuple[list[dict[str, Any]], str | None]:
+        """Return only contiguous, receipt-validated events for final scoring."""
+        with self.connection(True) as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT next_batch_seq,last_receipt_hash,received_event_count FROM captcha_behavior_sessions
+                WHERE challenge_id=%s""",
+                (challenge_id,),
+            )
+            session = cur.fetchone()
+            if not session:
+                return [], "behavior_session_missing"
+            cur.execute(
+                """SELECT batch_seq,event_count,previous_receipt_hash,payload_hash,receipt_hash,events_json,received_at
+                FROM captcha_behavior_batches WHERE challenge_id=%s ORDER BY batch_seq""",
+                (challenge_id,),
+            )
+            rows = cur.fetchall()
+
+        return _validate_behavior_batches(challenge_id, session, rows)
 
     def get_question(self, question_id: str) -> dict[str, Any] | None:
         with self.connection(True) as conn, conn.cursor() as cur:

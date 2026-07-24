@@ -42,6 +42,9 @@ class Settings:
     # Shadow is deliberately the default. A CAPTCHA answer stays authoritative
     # until real main-CAPTCHA data has calibrated the model and thresholds.
     behavior_policy_mode: Literal["shadow", "active"] = os.getenv("BEHAVIOR_POLICY_MODE", "shadow")  # type: ignore[assignment]
+    # This controls how browser events reach the CAPTCHA server. Keep it off
+    # until the production CAPTCHA frontend and DB are deployed together.
+    behavior_event_transport: Literal["off", "shadow", "active"] = os.getenv("BEHAVIOR_EVENT_TRANSPORT", "off")  # type: ignore[assignment]
     final_dir: Path = path_setting("FINAL_DIR", "data/final")
     labeling_dir: Path = path_setting("LABELING_DIR", "data/labeling")
     runtime_dir: Path = path_setting("RUNTIME_DIR", "data/runtime")
@@ -50,6 +53,8 @@ class Settings:
     def validate(self) -> None:
         if self.behavior_policy_mode not in {"shadow", "active"}:
             raise RuntimeError("BEHAVIOR_POLICY_MODE must be shadow or active")
+        if self.behavior_event_transport not in {"off", "shadow", "active"}:
+            raise RuntimeError("BEHAVIOR_EVENT_TRANSPORT must be off, shadow or active")
         if os.getenv("APP_ENV", "development") == "production":
             for name, value in {
                 "APP_SECRET": self.app_secret,

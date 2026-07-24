@@ -23,32 +23,109 @@ function CaptchaApp() {
   const [dragPoint, setDragPoint] = useState(null);
   const [message, setMessage] = useState("보안 문제를 준비하고 있습니다.");
   const [token, setToken] = useState("");
-  const [events, setEvents] = useState([]);
   const [startedAt, setStartedAt] = useState(0);
   const stageRef = useRef(null);
   const dropRef = useRef(null);
   const lastMove = useRef(0);
+  const challengeRef = useRef(null);
+  const siteKeyRef = useRef("");
+  const behaviorNonceRef = useRef("");
+  const pendingEventsRef = useRef([]);
+  const nextEventSeqRef = useRef(0);
+  const nextBatchSeqRef = useRef(0);
+  const previousReceiptRef = useRef(null);
+  const flushTimerRef = useRef(null);
+  const flushPromiseRef = useRef(null);
+  const collectorGenerationRef = useRef(0);
+
+  const flushBehavior = async () => {
+    if (flushPromiseRef.current) return flushPromiseRef.current;
+    const activeChallenge = challengeRef.current;
+    const nonce = behaviorNonceRef.current;
+    const generation = collectorGenerationRef.current;
+    if (activeChallenge?.behavior_event_transport === "off") return true;
+    if (!activeChallenge || !nonce || !pendingEventsRef.current.length) return true;
+
+    const run = async () => {
+      try {
+        while (pendingEventsRef.current.length) {
+          if (generation !== collectorGenerationRef.current) return false;
+          const batch = pendingEventsRef.current.slice(0, activeChallenge.behavior_batch_max_events || 32);
+          const result = await api(`/api/captcha/challenges/${activeChallenge.challenge_id}/behavior-batches`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Captcha-Site-Key": siteKeyRef.current },
+            body: JSON.stringify({
+              session_id: sessionId(),
+              nonce,
+              batch_seq: nextBatchSeqRef.current,
+              previous_receipt: previousReceiptRef.current,
+              events: batch,
+            }),
+          });
+          if (!result.accepted || !result.receipt) throw new Error("behavior_batch_rejected");
+          if (generation !== collectorGenerationRef.current) return false;
+          pendingEventsRef.current.splice(0, batch.length);
+          nextBatchSeqRef.current += 1;
+          previousReceiptRef.current = result.receipt;
+        }
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    const promise = run();
+    flushPromiseRef.current = promise;
+    try {
+      return await promise;
+    } finally {
+      if (flushPromiseRef.current === promise) flushPromiseRef.current = null;
+      if (pendingEventsRef.current.length) scheduleBehaviorFlush();
+    }
+  };
+
+  const scheduleBehaviorFlush = () => {
+    if (flushTimerRef.current || !challengeRef.current) return;
+    const interval = challengeRef.current.behavior_batch_interval_ms || 200;
+    flushTimerRef.current = window.setTimeout(() => {
+      flushTimerRef.current = null;
+      void flushBehavior();
+    }, interval);
+  };
 
   const record = (type, objectId, event) => {
+    if (challengeRef.current?.behavior_event_transport === "off") return;
     const now = Date.now();
     if (type === "pointer_move" && now - lastMove.current < 40) return;
     if (type === "pointer_move") lastMove.current = now;
     const rect = stageRef.current?.getBoundingClientRect();
-    setEvents((rows) => [...rows.slice(-550), { type, object_id: objectId || null,
+    pendingEventsRef.current.push({ seq: nextEventSeqRef.current++, type, object_id: objectId || null,
       x: rect && event ? Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) : null,
       y: rect && event ? Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)) : null,
-      timestamp_ms: now }]);
+      timestamp_ms: now });
+    scheduleBehaviorFlush();
   };
 
   const load = async () => {
     try {
-      setMessage("새 문제를 불러오는 중입니다."); setToken(""); setSelected([]); setEvents([]);
+      setMessage("새 문제를 불러오는 중입니다."); setToken(""); setSelected([]);
+      collectorGenerationRef.current += 1;
+      if (flushTimerRef.current) window.clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+      challengeRef.current = null;
+      behaviorNonceRef.current = "";
+      pendingEventsRef.current = [];
+      nextEventSeqRef.current = 0;
+      nextBatchSeqRef.current = 0;
+      previousReceiptRef.current = null;
+      lastMove.current = 0;
       const config = siteKey ? { siteKey } : await api("/api/config");
-      setSiteKey(config.siteKey);
+      setSiteKey(config.siteKey); siteKeyRef.current = config.siteKey;
       const row = await api("/api/captcha/challenges", { method: "POST", headers: { "Content-Type": "application/json", "X-Captcha-Site-Key": config.siteKey },
         body: JSON.stringify({ purpose: "signup", risk_level: "high", session_id: sessionId() }) });
-      setChallenge(row); setStartedAt(performance.now()); setMessage(row.instruction);
-      setEvents([{ type: "challenge_loaded", object_id: null, x: null, y: null, timestamp_ms: Date.now() }]);
+      setChallenge(row); challengeRef.current = row; behaviorNonceRef.current = row.behavior_nonce;
+      setStartedAt(performance.now()); setMessage(row.instruction);
+      record("challenge_loaded", null, null);
     } catch (error) { setMessage(error.message); }
   };
   useEffect(() => { load(); }, []);
@@ -79,12 +156,15 @@ function CaptchaApp() {
   const verify = async () => {
     if (!challenge || !selected.length) { setMessage("옮길 객체를 먼저 선택해주세요."); return; }
     try {
-      const submitEvent={type:"submit",object_id:null,x:null,y:null,timestamp_ms:Date.now()};
-      const payloadEvents=[...events.slice(-598),submitEvent]; setEvents(payloadEvents);
+      record("submit", null, null);
+      if (!(await flushBehavior())) {
+        setMessage("행동 데이터를 서버에 전송하지 못했습니다. 다시 시도해주세요.");
+        return;
+      }
       const result = await api(`/api/captcha/challenges/${challenge.challenge_id}/verify`, { method: "POST",
         headers: { "Content-Type": "application/json", "X-Captcha-Site-Key": siteKey },
         body: JSON.stringify({ selected_object_ids: selected, session_id: sessionId(),
-          duration_ms: Math.max(100, Math.round(performance.now() - startedAt)), events:payloadEvents }) });
+          duration_ms: Math.max(100, Math.round(performance.now() - startedAt)) }) });
       if (result.success) {
         setToken(result.captcha_token);
         setMessage("인증되었습니다.");
