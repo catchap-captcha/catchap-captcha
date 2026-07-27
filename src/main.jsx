@@ -102,18 +102,23 @@ function CaptchaApp() {
           <span className="cc-verif">Verification</span>
         </div>
         <h1 className="cc-title">계속하기 전에, 확인이 필요해요</h1>
-        <p className="cc-sub">{message}</p>
+        <p className="cc-sub">{challenge ? message : "강의에 집중하고 있는지 간단한 문제로 확인합니다."}</p>
       </div>
 
-      {challenge && <div className="cc-main">
+      <div className="cc-main">
         <div className="cc-rowhead"><span className="cc-tag">문제</span><button className="cc-link" onClick={load}>문제 바꾸기</button></div>
-        <div className="cc-stage" ref={stageRef} onPointerMove={moveDrag} onPointerUp={drop} onPointerCancel={()=>{setDragging(null);setDragPoint(null);}}>
-          <img src={challenge.image_url} alt="CAPTCHA 원본 장면" draggable="false" />
-          {challenge.objects.filter((obj) => !selected.includes(obj.object_id)).map((obj) => <button key={obj.object_id} className="hit-object"
-            style={{ left:`${obj.hit_region[0]*100}%`,top:`${obj.hit_region[1]*100}%`,width:`${obj.hit_region[2]*100}%`,height:`${obj.hit_region[3]*100}%` }}
-            onPointerEnter={(e)=>record("object_enter",obj.object_id,e)} onPointerLeave={(e)=>record("object_leave",obj.object_id,e)}
-            onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); setDragging(obj); setDragPoint({x:e.clientX,y:e.clientY}); record("pointer_down", obj.object_id, e); record("drag_start", obj.object_id, e); }}
-            aria-label="사진 속 객체를 정답존으로 드래그" />)}
+        <div className={`cc-stage ${challenge ? "loaded" : ""}`} ref={stageRef} onPointerMove={moveDrag} onPointerUp={drop} onPointerCancel={()=>{setDragging(null);setDragPoint(null);}}>
+          {challenge ? <>
+            <img src={challenge.image_url} alt="CAPTCHA 원본 장면" draggable="false" />
+            {challenge.objects.filter((obj) => !selected.includes(obj.object_id)).map((obj) => <button key={obj.object_id} className="hit-object"
+              style={{ left:`${obj.hit_region[0]*100}%`,top:`${obj.hit_region[1]*100}%`,width:`${obj.hit_region[2]*100}%`,height:`${obj.hit_region[3]*100}%` }}
+              onPointerEnter={(e)=>record("object_enter",obj.object_id,e)} onPointerLeave={(e)=>record("object_leave",obj.object_id,e)}
+              onPointerDown={(e) => { e.currentTarget.setPointerCapture(e.pointerId); setDragging(obj); setDragPoint({x:e.clientX,y:e.clientY}); record("pointer_down", obj.object_id, e); record("drag_start", obj.object_id, e); }}
+              aria-label="사진 속 객체를 정답존으로 드래그" />)}
+          </> : <div className="cc-stage-empty">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="8.5" cy="8.5" r="1.6"/><path d="M21 15l-5-5L5 21"/></svg>
+            <span>문제 이미지</span>
+          </div>}
         </div>
         <div className="cc-rowhead"><span className="cc-tag">정답존</span>{selected.length > 0 && <button className="cc-link muted" onClick={clearAll}>비우기</button>}</div>
         <div ref={dropRef} className={`cc-zone ${dragging ? "armed" : ""} ${selected.length ? "filled" : ""}`} onPointerUp={drop}>
@@ -121,7 +126,7 @@ function CaptchaApp() {
             ? <div className="cc-chips">{selected.map((id) => { const obj=challenge.objects.find((item)=>item.object_id===id); return <button key={id} className="cc-chip" onClick={()=>remove(id)} title="선택 취소"><img src={obj.preview_url} alt="선택한 객체"/><span className="cc-chip-x">×</span></button>; })}</div>
             : <span className="cc-zone-empty">이미지에서 정답 객체를 이곳으로 드래그하세요</span>}
         </div>
-      </div>}
+      </div>
 
       {dragging && dragPoint && <img className="drag-ghost" style={{left:dragPoint.x,top:dragPoint.y}} src={dragging.preview_url} alt="드래그 중인 객체" />}
 
