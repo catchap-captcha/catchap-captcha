@@ -392,6 +392,13 @@ def claim_item(queue_id: str, x_captcha_admin_key: str | None = Header(None)):
     return {"held": database.touch_claim(queue_id, reviewer)}
 
 
+@app.get("/api/admin/counts")
+def admin_counts(x_captcha_admin_key: str | None = Header(None)):
+    """전원 합산 승인/제외 개수(DB 기준). 실시간 폴링용."""
+    require_admin(x_captcha_admin_key)
+    return database.review_counts()
+
+
 @app.get("/api/admin/assets/{path:path}")
 def admin_asset(path: str, x_captcha_admin_key: str | None = Header(None)):
     require_admin(x_captcha_admin_key)
