@@ -26,7 +26,7 @@ from .behavior_client import (
     build_predict_payload,
     resolve_final_verdict,
 )
-from .config import ROOT_DIR, settings
+from .config import settings
 from .db import Database, utcnow
 
 
@@ -199,6 +199,187 @@ def summarize(events: list[BehaviorEvent], selected: set[str], targets: set[str]
     }
 
 
+def validate_behavior_lifecycle(events: list[dict]) -> str | None:
+    """Require a minimally complete, server-recorded drag interaction.
+
+    This is intentionally a structural gate, not a claim that browser events
+    alone prove humanness. In active transport mode it prevents a correct
+    answer without a drag lifecycle from silently bypassing the step-up path.
+    """
+    if not events:
+        return "behavior_batches_missing"
+    types = [event.get("type") for event in events]
+    if types[0] != "challenge_loaded":
+        return "behavior_lifecycle_missing_load"
+    if types[-1] != "submit":
+        return "behavior_lifecycle_missing_submit"
+    required = ("pointer_down", "pointer_move", "drop", "selection_add")
+    for event_type in required:
+        if event_type not in types:
+            return f"behavior_lifecycle_missing_{event_type}"
+    timestamps = [int(event["timestamp_ms"]) for event in events]
+    if any(current < previous for previous, current in zip(timestamps, timestamps[1:])):
+        return "behavior_lifecycle_timestamp_invalid"
+    return None
+
+
+def validate_behavior_action_binding(
+    events: list[dict],
+    challenge_objects: list[dict],
+    selected_object_ids: set[str],
+) -> str | None:
+    """Bind each submitted selection to a plausible object-drag lifecycle.
+
+    The frontend's drop zone sits outside the image stage, so its final pointer
+    coordinates cannot be compared to the image bounding boxes reliably. The
+    source press can be checked server-side: it must start inside the selected
+    object's issued hit region and be followed by drag, drop and selection.
+    """
+    objects = {str(row["temporary_object_id"]): row for row in challenge_objects}
+    for object_id in selected_object_ids:
+        source = objects.get(object_id)
+        if source is None:
+            return "behavior_action_unknown_object"
+        x0 = float(source["bbox_x"])
+        y0 = float(source["bbox_y"])
+        x1 = x0 + float(source["bbox_width"])
+        y1 = y0 + float(source["bbox_height"])
+
+        press_index = next(
+            (
+                index
+                for index, event in enumerate(events)
+                if event.get("type") == "pointer_down" and event.get("object_id") == object_id
+            ),
+            None,
+        )
+        if press_index is None:
+            return "behavior_action_binding_missing"
+        press = events[press_index]
+        x, y = press.get("x"), press.get("y")
+        if x is None or y is None or not (x0 <= float(x) <= x1 and y0 <= float(y) <= y1):
+            return "behavior_action_start_outside_source"
+
+        required_after_press = ("drag_start", "drop", "selection_add")
+        previous_index = press_index
+        for event_type in required_after_press:
+            next_index = next(
+                (
+                    index
+                    for index, event in enumerate(events[previous_index + 1 :], start=previous_index + 1)
+                    if event.get("type") == event_type and event.get("object_id") == object_id
+                ),
+                None,
+            )
+            if next_index is None:
+                return "behavior_action_binding_missing"
+            previous_index = next_index
+    return None
+
+
+def trusted_duration_ms(events: list[BehaviorEvent], fallback_duration_ms: int) -> int:
+    """Prefer the receipt-validated event span over a separate payload field.
+
+    Event timestamps originate in the browser, so this remains a behavioral
+    feature rather than an authoritative clock. Server receipt cadence is
+    evaluated separately by ``detect_batch_delivery_timing``.
+    """
+    loaded_at = next((event.timestamp_ms for event in events if event.type == "challenge_loaded"), None)
+    submitted_at = next((event.timestamp_ms for event in reversed(events) if event.type == "submit"), None)
+    if loaded_at is None or submitted_at is None or submitted_at < loaded_at:
+        return fallback_duration_ms
+    return max(100, min(180000, submitted_at - loaded_at))
+
+
+def detect_batch_delivery_timing(
+    events: list[BehaviorEvent], received_at: list,
+) -> dict[str, int | bool]:
+    """Flag a long browser timeline uploaded as a short final server burst.
+
+    The UI sends receipt-chained batches every 200ms while events are being
+    collected. A client-generated timeline can be forged, but a long trace
+    sent in one short server-side burst has a measurable discrepancy. The
+    signal asks for step-up only, preserving room for slow or interrupted
+    network delivery.
+    """
+    client_span_ms = trusted_duration_ms(events, 0)
+    if len(received_at) < 2:
+        return {
+            "detected": False,
+            "client_event_span_ms": client_span_ms,
+            "server_batch_span_ms": 0,
+            "delivery_discrepancy_ms": 0,
+            "batch_count": len(received_at),
+        }
+
+    server_span_ms = max(0, int((received_at[-1] - received_at[0]).total_seconds() * 1000))
+    discrepancy_ms = max(0, client_span_ms - server_span_ms)
+    detected = (
+        client_span_ms >= 1500
+        and discrepancy_ms >= 1200
+        and server_span_ms <= max(500, int(client_span_ms * 0.45))
+    )
+    return {
+        "detected": detected,
+        "client_event_span_ms": client_span_ms,
+        "server_batch_span_ms": server_span_ms,
+        "delivery_discrepancy_ms": discrepancy_ms,
+        "batch_count": len(received_at),
+    }
+
+
+def detect_stop_go_signal(events: list[BehaviorEvent]) -> dict[str, int | bool]:
+    """Detect a narrow scripted stop/go and terminal-correction pattern.
+
+    The signal is intentionally conservative: one pause alone is normal human
+    behavior. It becomes suspicious only when a long stationary segment is
+    followed immediately by a large restart and a small reversal near the end
+    of the drag. The caller uses it for step-up, never a hard block.
+    """
+    points = [
+        event
+        for event in events
+        if event.type in {"pointer_down", "drag_start", "pointer_move", "drop"}
+        and event.x is not None
+        and event.y is not None
+    ]
+    segments: list[tuple[float, float, float, int]] = []
+    for previous, current in zip(points, points[1:]):
+        dx = current.x - previous.x
+        dy = current.y - previous.y
+        segments.append((dx, dy, math.hypot(dx, dy), current.timestamp_ms - previous.timestamp_ms))
+
+    pause_restart_count = 0
+    for pause, restart in zip(segments, segments[1:]):
+        _, _, pause_distance, pause_duration = pause
+        _, _, restart_distance, restart_duration = restart
+        if (
+            pause_distance <= 0.015
+            and pause_duration >= 300
+            and restart_distance >= 0.20
+            and 0 < restart_duration <= 350
+        ):
+            pause_restart_count += 1
+
+    movement_segments = [segment for segment in segments if segment[2] >= 0.008]
+    terminal_correction = False
+    if len(movement_segments) >= 2:
+        previous_dx, previous_dy, _, _ = movement_segments[-2]
+        correction_dx, correction_dy, correction_distance, _ = movement_segments[-1]
+        direction_dot = previous_dx * correction_dx + previous_dy * correction_dy
+        terminal_correction = direction_dot < 0 and 0.01 <= correction_distance <= 0.08
+
+    pointer_move_count = sum(event.type == "pointer_move" for event in events)
+    sparse_pause_restart = pause_restart_count > 0 and pointer_move_count <= 5
+
+    return {
+        "detected": pause_restart_count > 0 and terminal_correction,
+        "pause_restart_count": pause_restart_count,
+        "terminal_correction": terminal_correction,
+        "sparse_pause_restart": sparse_pause_restart,
+    }
+
+
 def queue_rows(view: str = "pending") -> list[dict]:
     path = settings.labeling_dir / ("relation_candidates_all.jsonl" if view in {"approved", "rejected", "all"} else "queue.jsonl")
     if not path.exists(): return []
@@ -260,12 +441,27 @@ def live(): return {"status": "ok"}
 
 @app.get("/health/ready")
 def ready():
+    database_ready = database.ping()
+    approved_questions = bool(database.active_question()) if database_ready else False
+    ai_readiness = behavior_ai.readiness()
+    behavior_required = settings.behavior_event_transport != "off"
+    ai_policy_matches = (
+        not behavior_required
+        or ai_readiness.policy_mode == settings.behavior_policy_mode
+    )
+    service_ready = (
+        database_ready
+        and approved_questions
+        and (not behavior_required or (ai_readiness.ready and ai_policy_matches))
+    )
     return {
-        "status": "ok" if database.ping() else "error",
-        "approved_questions": bool(database.active_question()),
+        "status": "ok" if service_ready else "error",
+        "database_ready": database_ready,
+        "approved_questions": approved_questions,
         "behavior_policy_mode": settings.behavior_policy_mode,
         "behavior_event_transport": settings.behavior_event_transport,
-        "behavior_ai_configured": behavior_ai.enabled,
+        "behavior_ai_policy_matches": ai_policy_matches,
+        "behavior_ai": ai_readiness.as_dict(),
     }
 
 
@@ -279,6 +475,8 @@ def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_
     ip_hash=hash_value(client_ip(request)); pattern=database.request_pattern(payload.session_id,ip_hash)
     if pattern["ip_challenges_1m"]>=settings.max_challenges_per_minute:
         raise HTTPException(429,"Too many CAPTCHA requests")
+    if pattern["session_telemetry_failures_10m"]>=settings.max_telemetry_failures_10m:
+        raise HTTPException(429,"Too many invalid behavior attempts")
     question = database.active_question()
     if not question: raise HTTPException(503, "No approved CAPTCHA questions")
     challenge_id = str(uuid.uuid4()); now = utcnow(); expires = now + timedelta(seconds=settings.challenge_ttl_seconds)
@@ -359,6 +557,8 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
     if challenge["status"] == "passed": raise HTTPException(409, "Challenge already used")
     if challenge["expires_at"] <= verify_received_at: raise HTTPException(410, "Challenge expired")
     if challenge["attempt_count"] >= settings.max_attempts: raise HTTPException(429, "No attempts remaining")
+    if len(payload.selected_object_ids) != len(set(payload.selected_object_ids)):
+        raise HTTPException(422, "Duplicate selected object")
     submitted=set(payload.selected_object_ids); targets={o["temporary_object_id"] for o in challenge["objects"] if o["role"]=="target"}
     valid={o["temporary_object_id"] for o in challenge["objects"]}; correct=submitted==targets and submitted <= valid
     reason=None if correct else ("unknown_object" if not submitted<=valid else "incorrect_selection")
@@ -369,23 +569,31 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
     behavior_id = behavior_attempt_id(challenge_id, int(challenge["attempt_count"]) + 1)
     if settings.behavior_event_transport == "off":
         server_events, telemetry_reason = [], None
+        batch_received_at = []
         prediction = BehaviorPrediction(behavior_id, "disabled", "behavior_transport_off")
     else:
         server_events, telemetry_reason = database.trusted_behavior_events(challenge_id)
-        predict_payload, predict_reason = build_predict_payload(
-            attempt_id=behavior_id,
-            challenge_id=challenge_id,
-            session_id=payload.session_id,
-            events=server_events,
-            width=int(question["image_width"]),
-            height=int(question["image_height"]),
-            retry_count=int(challenge["attempt_count"]),
-            presented_at=challenge.get("created_at"),
-            submitted_at=verify_received_at,
-        )
+        if telemetry_reason is None:
+            telemetry_reason = validate_behavior_lifecycle(server_events)
+        if telemetry_reason is None:
+            telemetry_reason = validate_behavior_action_binding(server_events, challenge["objects"], submitted)
         if telemetry_reason:
             predict_payload, predict_reason = None, telemetry_reason
+        else:
+            predict_payload, predict_reason = build_predict_payload(
+                attempt_id=behavior_id,
+                challenge_id=challenge_id,
+                session_id=payload.session_id,
+                events=server_events,
+                width=int(question["image_width"]),
+                height=int(question["image_height"]),
+                retry_count=int(challenge["attempt_count"]),
+                presented_at=challenge.get("created_at"),
+                submitted_at=verify_received_at,
+            )
+            telemetry_reason = predict_reason
         prediction = behavior_ai.score(predict_payload, behavior_id, predict_reason)
+        batch_received_at = database.behavior_batch_received_at(challenge_id) if telemetry_reason is None else []
     main_verdict = "passed" if correct else "failed"
     final_verdict, enforced_action = resolve_final_verdict(
         captcha_correct=correct,
@@ -393,14 +601,34 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
         local_policy_mode=settings.behavior_policy_mode,
     )
 
+    current_ip_hash=hash_value(client_ip(request)); pattern=database.request_pattern(payload.session_id,current_ip_hash)
+    summary_events = [BehaviorEvent.model_validate(event) for event in server_events]
+    attempt_duration_ms = trusted_duration_ms(summary_events, payload.duration_ms)
+    stop_go_signal = detect_stop_go_signal(summary_events)
+    batch_delivery_timing = detect_batch_delivery_timing(summary_events, batch_received_at)
+    summary=summarize(summary_events,submitted,targets,attempt_duration_ms,correct,pattern,
+                      current_ip_hash!=challenge["client_ip_hash"])
+    summary["stop_go_signal"] = stop_go_signal
+    summary["batch_delivery_timing"] = batch_delivery_timing
+
     # During shadow rollout we retain the CAPTCHA outcome but record the
     # missing/invalid telemetry. In active mode it must receive a step-up.
-    if correct and telemetry_reason and settings.behavior_event_transport == "active":
-        final_verdict, enforced_action = "failed", "step_up"
+    # A narrow stop/go pattern is also step-up only: it is a supplemental
+    # server-side signal while the candidate model remains in shadow mode.
+    enforcement_reason = telemetry_reason
+    if correct and settings.behavior_event_transport == "active":
+        if telemetry_reason:
+            final_verdict, enforced_action = "failed", "step_up"
+        elif stop_go_signal["detected"]:
+            final_verdict, enforced_action = "failed", "step_up"
+            enforcement_reason = "behavior_stop_go_pattern"
+        elif stop_go_signal["sparse_pause_restart"]:
+            final_verdict, enforced_action = "failed", "step_up"
+            enforcement_reason = "behavior_sparse_pause_restart_pattern"
+        elif batch_delivery_timing["detected"]:
+            final_verdict, enforced_action = "failed", "step_up"
+            enforcement_reason = "behavior_batch_delivery_timing"
 
-    current_ip_hash=hash_value(client_ip(request)); pattern=database.request_pattern(payload.session_id,current_ip_hash)
-    summary=summarize(server_events,submitted,targets,payload.duration_ms,correct,pattern,
-                      current_ip_hash!=challenge["client_ip_hash"])
     event_dir=settings.runtime_dir/"behavior-events"/utcnow().strftime("%Y/%m/%d"); event_dir.mkdir(parents=True,exist_ok=True)
     event_file=event_dir/f"{challenge_id}-{challenge['attempt_count']+1}.json"
     event_file.write_text(json.dumps({"challenge_id":challenge_id,"behavior_attempt_id":behavior_id,
@@ -408,8 +636,8 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
         "submitted_browser_event_count":len(payload.events),"answer_correct":correct,
         "behavior_summary":summary},ensure_ascii=False),encoding="utf-8")
     captcha_attempt_id = database.record_attempt(
-        challenge_id, list(submitted), correct, reason, payload.duration_ms, summary,
-        str(event_file.relative_to(ROOT_DIR)),
+        challenge_id, list(submitted), correct, reason, attempt_duration_ms, summary,
+        str(event_file.relative_to(settings.runtime_dir)),
     )
     database.record_behavior_shadow_prediction(
         captcha_attempt_id, prediction, settings.behavior_policy_mode, main_verdict, final_verdict,
@@ -419,14 +647,45 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
         # did not alter the main CAPTCHA result.
         prediction = behavior_ai.record_shadow_outcome(prediction, main_verdict)
 
-    if not correct: return {"success":False,"remaining_attempts":max(0,settings.max_attempts-challenge["attempt_count"]-1)}
+    debug_payload = None
+    if settings.behavior_debug_response:
+        debug_payload = {
+            "status": prediction.status,
+            "detail": prediction.detail,
+            "human_score": prediction.human_score,
+            "bot_risk_score": prediction.bot_risk_score,
+            "risk_score": prediction.risk_score,
+            "risk_level": prediction.risk_level,
+            "recommended_action": prediction.recommended_action,
+            "model_name": prediction.model_name,
+            "model_version": prediction.model_version,
+            "reasons": prediction.reasons,
+            "telemetry_reason": telemetry_reason,
+            "enforcement_reason": enforcement_reason,
+            "stop_go_signal": stop_go_signal,
+            "batch_delivery_timing": batch_delivery_timing,
+        }
+    if not correct:
+        response = {"success":False,"remaining_attempts":max(0,settings.max_attempts-challenge["attempt_count"]-1)}
+        if debug_payload is not None:
+            response["behavior_debug"] = debug_payload
+        return response
     if enforced_action == "step_up_and_rate_limit":
-        return {"success":False,"blocked":True,"risk_level":prediction.risk_level}
+        response = {"success":False,"blocked":True,"risk_level":prediction.risk_level}
+        if debug_payload is not None:
+            response["behavior_debug"] = debug_payload
+        return response
     if enforced_action == "step_up":
-        return {"success":False,"step_up":True,"risk_level":prediction.risk_level}
+        response = {"success":False,"step_up":True,"risk_level":prediction.risk_level}
+        if debug_payload is not None:
+            response["behavior_debug"] = debug_payload
+        return response
     token=secrets.token_urlsafe(32); database.create_token(challenge_id,hash_value(token),challenge["purpose"],payload.session_id,
                                                          utcnow()+timedelta(seconds=settings.verification_ttl_seconds))
-    return {"success":True,"captcha_token":token,"expires_in":settings.verification_ttl_seconds}
+    response = {"success":True,"captcha_token":token,"expires_in":settings.verification_ttl_seconds}
+    if debug_payload is not None:
+        response["behavior_debug"] = debug_payload
+    return response
 
 
 @app.post("/api/signup", status_code=201)

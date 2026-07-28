@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from urllib.error import URLError
 
 from app.behavior_client import (
     BehaviorAIClient,
@@ -151,6 +152,61 @@ def test_client_uses_private_backend_header_and_parses_prediction():
     assert calls == [("http://behavior.internal/api/v1/behavior/predict", "private-key", 1.5)]
 
 
+def test_client_keeps_the_full_two_view_policy_response():
+    client = BehaviorAIClient(
+        "http://behavior.internal",
+        "private-key",
+        1.5,
+        opener=lambda *_args, **_kwargs: _Response(
+            {
+                "risk_score": 87.0,
+                "risk_level": "high",
+                "recommended_action": "step_up_and_rate_limit",
+                "policy_mode": "shadow",
+                "human_score": 0.6,
+                "bot_risk_score": 0.4,
+                "model_name": "lightgbm_general_dynamics_min_fusion",
+                "model_version": "revalidation_two_view_participant_safe_20260722",
+                "feature_schema_version": "2.3",
+                "reasons": ["two_view_fusion", "replay_signal"],
+            }
+        ),
+    )
+
+    prediction = client.score({"events": [{}]}, "attempt", None)
+
+    assert prediction.status == "scored"
+    assert prediction.risk_score == 87.0
+    assert prediction.recommended_action == "step_up_and_rate_limit"
+    assert prediction.policy_mode == "shadow"
+    assert prediction.model_version == "revalidation_two_view_participant_safe_20260722"
+    assert prediction.reasons == ("two_view_fusion", "replay_signal")
+
+
+def test_client_converts_a_candidate_model_score_to_shadow_only():
+    client = BehaviorAIClient(
+        "http://behavior.internal",
+        "private-key",
+        1.5,
+        opener=lambda *_args, **_kwargs: _Response(
+            {
+                "human_score": 0.72,
+                "bot_risk_score": 0.28,
+                "model_name": "random_forest",
+                "model_version": "candidate-local",
+                "feature_schema_version": "1.0",
+            }
+        ),
+    )
+
+    prediction = client.score({"events": [{}]}, "attempt", None)
+
+    assert prediction.status == "scored"
+    assert prediction.risk_score == 28.0
+    assert prediction.recommended_action == "allow"
+    assert prediction.policy_mode == "shadow"
+
+
 def test_invalid_behavior_response_fails_open_for_the_captcha_server():
     client = BehaviorAIClient(
         "http://behavior.internal",
@@ -163,3 +219,46 @@ def test_invalid_behavior_response_fails_open_for_the_captcha_server():
 
     assert prediction.status == "error"
     assert prediction.detail == "behavior_ai_invalid_action"
+
+
+def test_readiness_requires_a_reachable_service_with_a_loaded_model():
+    calls = []
+
+    def opener(request, timeout):
+        calls.append((request.full_url, request.get_method(), request.get_header("X-captcha-backend-key"), timeout))
+        return _Response(
+            {
+                "status": "ok",
+                "model_loaded": True,
+                "model_name": "lightgbm_general_dynamics_min_fusion",
+                "model_version": "revalidation_two_view_participant_safe_20260722",
+                "feature_schema_version": "2.3",
+                "policy_mode": "shadow",
+            }
+        )
+
+    readiness = BehaviorAIClient("http://behavior.internal", "private-key", 1.5, opener=opener).readiness()
+
+    assert readiness.ready is True
+    assert readiness.model_version == "revalidation_two_view_participant_safe_20260722"
+    assert calls == [("http://behavior.internal/health", "GET", "private-key", 1.5)]
+
+
+def test_readiness_rejects_a_degraded_or_unreachable_behavior_service():
+    degraded = BehaviorAIClient(
+        "http://behavior.internal",
+        "private-key",
+        1.5,
+        opener=lambda *_args, **_kwargs: _Response({"status": "degraded", "model_loaded": True}),
+    ).readiness()
+    unreachable = BehaviorAIClient(
+        "http://behavior.internal",
+        "private-key",
+        1.5,
+        opener=lambda *_args, **_kwargs: (_ for _ in ()).throw(URLError("offline")),
+    ).readiness()
+
+    assert degraded.ready is False
+    assert degraded.detail == "behavior_ai_degraded"
+    assert unreachable.ready is False
+    assert unreachable.detail == "behavior_ai_request_failed:URLError"

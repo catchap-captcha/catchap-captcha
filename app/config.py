@@ -34,6 +34,7 @@ class Settings:
     verification_ttl_seconds: int = int(os.getenv("VERIFICATION_TTL_SECONDS", "300"))
     max_attempts: int = int(os.getenv("MAX_ATTEMPTS", "3"))
     max_challenges_per_minute: int = int(os.getenv("MAX_CHALLENGES_PER_MINUTE", "30"))
+    max_telemetry_failures_10m: int = int(os.getenv("MAX_TELEMETRY_FAILURES_10M", "3"))
     # The behavior model runs as a separate internal service. Browser clients
     # never receive this key and cannot call the model directly.
     behavior_ai_url: str = os.getenv("BEHAVIOR_AI_URL", "")
@@ -45,6 +46,9 @@ class Settings:
     # This controls how browser events reach the CAPTCHA server. Keep it off
     # until the production CAPTCHA frontend and DB are deployed together.
     behavior_event_transport: Literal["off", "shadow", "active"] = os.getenv("BEHAVIOR_EVENT_TRANSPORT", "off")  # type: ignore[assignment]
+    # Local-only diagnostics. Keep this disabled outside a developer-run test
+    # because behavior scores must not be exposed to CAPTCHA clients.
+    behavior_debug_response: bool = os.getenv("BEHAVIOR_DEBUG_RESPONSE", "false").lower() == "true"
     final_dir: Path = path_setting("FINAL_DIR", "data/final")
     labeling_dir: Path = path_setting("LABELING_DIR", "data/labeling")
     runtime_dir: Path = path_setting("RUNTIME_DIR", "data/runtime")

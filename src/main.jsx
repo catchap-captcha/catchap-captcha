@@ -23,6 +23,7 @@ function CaptchaApp() {
   const [dragPoint, setDragPoint] = useState(null);
   const [message, setMessage] = useState("보안 문제를 준비하고 있습니다.");
   const [token, setToken] = useState("");
+  const [behaviorDebug, setBehaviorDebug] = useState(null);
   const [startedAt, setStartedAt] = useState(0);
   const stageRef = useRef(null);
   const dropRef = useRef(null);
@@ -37,9 +38,11 @@ function CaptchaApp() {
   const flushTimerRef = useRef(null);
   const flushPromiseRef = useRef(null);
   const collectorGenerationRef = useRef(0);
+  const behaviorTransportFailedRef = useRef(false);
 
   const flushBehavior = async () => {
     if (flushPromiseRef.current) return flushPromiseRef.current;
+    if (behaviorTransportFailedRef.current) return false;
     const activeChallenge = challengeRef.current;
     const nonce = behaviorNonceRef.current;
     const generation = collectorGenerationRef.current;
@@ -70,6 +73,7 @@ function CaptchaApp() {
         }
         return true;
       } catch {
+        behaviorTransportFailedRef.current = true;
         return false;
       }
     };
@@ -80,12 +84,12 @@ function CaptchaApp() {
       return await promise;
     } finally {
       if (flushPromiseRef.current === promise) flushPromiseRef.current = null;
-      if (pendingEventsRef.current.length) scheduleBehaviorFlush();
+      if (pendingEventsRef.current.length && !behaviorTransportFailedRef.current) scheduleBehaviorFlush();
     }
   };
 
   const scheduleBehaviorFlush = () => {
-    if (flushTimerRef.current || !challengeRef.current) return;
+    if (flushTimerRef.current || !challengeRef.current || behaviorTransportFailedRef.current) return;
     const interval = challengeRef.current.behavior_batch_interval_ms || 200;
     flushTimerRef.current = window.setTimeout(() => {
       flushTimerRef.current = null;
@@ -108,7 +112,7 @@ function CaptchaApp() {
 
   const load = async () => {
     try {
-      setMessage("새 문제를 불러오는 중입니다."); setToken(""); setSelected([]);
+      setMessage("새 문제를 불러오는 중입니다."); setToken(""); setSelected([]); setBehaviorDebug(null);
       collectorGenerationRef.current += 1;
       if (flushTimerRef.current) window.clearTimeout(flushTimerRef.current);
       flushTimerRef.current = null;
@@ -119,6 +123,7 @@ function CaptchaApp() {
       nextBatchSeqRef.current = 0;
       previousReceiptRef.current = null;
       lastMove.current = 0;
+      behaviorTransportFailedRef.current = false;
       const config = siteKey ? { siteKey } : await api("/api/config");
       setSiteKey(config.siteKey); siteKeyRef.current = config.siteKey;
       const row = await api("/api/captcha/challenges", { method: "POST", headers: { "Content-Type": "application/json", "X-Captcha-Site-Key": config.siteKey },
@@ -165,6 +170,7 @@ function CaptchaApp() {
         headers: { "Content-Type": "application/json", "X-Captcha-Site-Key": siteKey },
         body: JSON.stringify({ selected_object_ids: selected, session_id: sessionId(),
           duration_ms: Math.max(100, Math.round(performance.now() - startedAt)) }) });
+      setBehaviorDebug(result.behavior_debug || null);
       if (result.success) {
         setToken(result.captcha_token);
         setMessage("인증되었습니다.");
@@ -214,6 +220,17 @@ function CaptchaApp() {
           ? <div className="cc-done" role="status">확인되었습니다 · 잠시 후 이어집니다</div>
           : <button className="cc-verify" onClick={verify} disabled={!challenge || !selected.length}>확인</button>}
         <div className="cc-guard"><span>이 확인은 <strong>CatChap Guard</strong>로 보호됩니다</span><a className="cc-admin-link" href="/admin">라벨링 콘솔</a></div>
+        {behaviorDebug && <section className="cc-debug" aria-label="로컬 행동 모델 점수">
+          <strong>로컬 행동 점수</strong>
+          <span>{behaviorDebug.model_name || "모델 미연결"} · {behaviorDebug.model_version || behaviorDebug.status}</span>
+          <dl>
+            <div><dt>사람 점수</dt><dd>{behaviorDebug.human_score ?? "-"}</dd></div>
+            <div><dt>봇 위험</dt><dd>{behaviorDebug.bot_risk_score ?? "-"}</dd></div>
+            <div><dt>위험 등급</dt><dd>{behaviorDebug.risk_level || "-"}</dd></div>
+            <div><dt>권고</dt><dd>{behaviorDebug.recommended_action || "-"}</dd></div>
+          </dl>
+          {behaviorDebug.detail && <small>{behaviorDebug.detail}</small>}
+        </section>}
       </div>
     </div>
   </div>;

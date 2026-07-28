@@ -54,4 +54,6 @@
 .cc-guard strong{color:#1d1d1f;font-weight:700}
 .cc-admin-link{font-size:12px;color:#c7c7cc;text-decoration:none}
 .cc-admin-link:hover{color:#86868b}
+.cc-debug{display:grid;gap:8px;margin-top:16px;padding:14px;border:1px solid #d6e6ff;border-radius:10px;background:#f6faff;color:#1d1d1f;font-size:12px}
+.cc-debug>strong{font-size:13px}.cc-debug>span,.cc-debug small{color:#5b6470}.cc-debug dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin:0}.cc-debug dl div{display:flex;justify-content:space-between;gap:8px;padding:7px 8px;border-radius:7px;background:#fff}.cc-debug dt{color:#6e7681}.cc-debug dd{margin:0;font-weight:700}
 @media(max-width:600px){.cc-top{padding:24px 22px 0}.cc-main{padding:22px 22px 0}.cc-bottom{padding:20px 22px 24px}.cc-sub{font-size:20px}.cc-stage{height:220px}}

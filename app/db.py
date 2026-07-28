@@ -265,14 +265,22 @@ class Database:
               WHERE c.session_id=%s AND a.is_correct=0
                 AND a.created_at>UTC_TIMESTAMP(6)-INTERVAL 10 MINUTE""", (session_id,))
             session_failures_10m=int(cur.fetchone()["n"])
+            cur.execute("""SELECT COUNT(*) n FROM behavior_shadow_predictions p
+              JOIN captcha_attempts a ON a.id=p.captcha_attempt_id
+              JOIN captcha_challenges_v2 c ON c.id=a.challenge_id
+              WHERE c.session_id=%s AND p.final_verdict='failed' AND p.status='unavailable'
+                AND p.created_at>UTC_TIMESTAMP(6)-INTERVAL 10 MINUTE""", (session_id,))
+            session_telemetry_failures_10m=int(cur.fetchone()["n"])
         return {"ip_challenges_1m":ip_challenges_1m,"session_challenges_10m":session_challenges_10m,
-                "session_failures_10m":session_failures_10m}
+                "session_failures_10m":session_failures_10m,
+                "session_telemetry_failures_10m":session_telemetry_failures_10m}
 
     def challenge_for_verify(self, challenge_id: str) -> dict[str, Any] | None:
         with self.connection(True) as conn, conn.cursor() as cur:
             cur.execute("SELECT * FROM captcha_challenges_v2 WHERE id=%s", (challenge_id,)); challenge=cur.fetchone()
             if not challenge: return None
-            cur.execute("""SELECT m.temporary_object_id,m.object_id,o.role,o.piece_path FROM captcha_challenge_objects m
+            cur.execute("""SELECT m.temporary_object_id,m.object_id,o.role,o.piece_path,
+              o.bbox_x,o.bbox_y,o.bbox_width,o.bbox_height FROM captcha_challenge_objects m
               JOIN captcha_objects o ON o.id=m.object_id WHERE m.challenge_id=%s""", (challenge_id,))
             challenge["objects"] = cur.fetchall(); return challenge
 
@@ -376,6 +384,16 @@ class Database:
             rows = cur.fetchall()
 
         return _validate_behavior_batches(challenge_id, session, rows)
+
+    def behavior_batch_received_at(self, challenge_id: str) -> list[datetime]:
+        """Return server-assigned receipt times for a previously validated batch stream."""
+        with self.connection(True) as conn, conn.cursor() as cur:
+            cur.execute(
+                """SELECT received_at FROM captcha_behavior_batches
+                WHERE challenge_id=%s ORDER BY batch_seq""",
+                (challenge_id,),
+            )
+            return [row["received_at"] for row in cur.fetchall()]
 
     def get_question(self, question_id: str) -> dict[str, Any] | None:
         with self.connection(True) as conn, conn.cursor() as cur:

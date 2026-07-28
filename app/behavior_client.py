@@ -46,6 +46,39 @@ class BehaviorPrediction:
     reasons: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class BehaviorAIReadiness:
+    """Deployment-safe health summary for the internal behavior service."""
+
+    configured: bool
+    reachable: bool
+    model_loaded: bool
+    service_status: str | None = None
+    model_name: str | None = None
+    model_version: str | None = None
+    feature_schema_version: str | None = None
+    policy_mode: str | None = None
+    detail: str | None = None
+
+    @property
+    def ready(self) -> bool:
+        return self.configured and self.reachable and self.model_loaded
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "configured": self.configured,
+            "reachable": self.reachable,
+            "model_loaded": self.model_loaded,
+            "ready": self.ready,
+            "service_status": self.service_status,
+            "model_name": self.model_name,
+            "model_version": self.model_version,
+            "feature_schema_version": self.feature_schema_version,
+            "policy_mode": self.policy_mode,
+            "detail": self.detail,
+        }
+
+
 def behavior_attempt_id(challenge_id: str, attempt_number: int) -> str:
     """Stable, bounded ID shared with the behavior service for idempotency."""
     return f"ms-{challenge_id}-a{attempt_number}"[:64]
@@ -188,6 +221,53 @@ class BehaviorAIClient:
     def enabled(self) -> bool:
         return bool(self.base_url and self.backend_key)
 
+    def readiness(self) -> BehaviorAIReadiness:
+        """Check the internal scorer without exposing its URL or backend key.
+
+        A configured but degraded service is deliberately not considered ready:
+        scoring would otherwise appear healthy while the service cannot persist
+        shadow outcomes or has not loaded its promoted model bundle.
+        """
+        if not self.enabled:
+            return BehaviorAIReadiness(False, False, False, detail="behavior_ai_not_configured")
+
+        try:
+            body = self._get("/health")
+        except HTTPError as error:
+            return BehaviorAIReadiness(
+                True,
+                False,
+                False,
+                detail=f"behavior_ai_http_{error.code}",
+            )
+        except (OSError, URLError, ValueError) as error:
+            return BehaviorAIReadiness(
+                True,
+                False,
+                False,
+                detail=f"behavior_ai_request_failed:{type(error).__name__}",
+            )
+
+        if not isinstance(body, dict):
+            return BehaviorAIReadiness(True, False, False, detail="behavior_ai_invalid_health_response")
+
+        service_status = body.get("status")
+        model_loaded = body.get("model_loaded")
+        if service_status not in {"ok", "degraded"} or not isinstance(model_loaded, bool):
+            return BehaviorAIReadiness(True, False, False, detail="behavior_ai_invalid_health_response")
+
+        return BehaviorAIReadiness(
+            configured=True,
+            reachable=service_status == "ok",
+            model_loaded=model_loaded,
+            service_status=service_status,
+            model_name=_optional_string(body.get("model_name")),
+            model_version=_optional_string(body.get("model_version")),
+            feature_schema_version=_optional_string(body.get("feature_schema_version")),
+            policy_mode=_optional_string(body.get("policy_mode")),
+            detail=None if service_status == "ok" else "behavior_ai_degraded",
+        )
+
     def score(self, payload: dict[str, Any] | None, attempt_id: str, reason: str | None) -> BehaviorPrediction:
         if not self.enabled:
             return BehaviorPrediction(attempt_id, "disabled", "behavior_ai_not_configured")
@@ -202,6 +282,14 @@ class BehaviorAIClient:
             return BehaviorPrediction(attempt_id, state, f"behavior_ai_http_{error.code}:{detail}")
         except (OSError, URLError, ValueError) as error:
             return BehaviorPrediction(attempt_id, "error", f"behavior_ai_request_failed:{type(error).__name__}")
+
+        # The behavior API is being rolled out in stages. Its older candidate
+        # endpoint returns core model fields only, so turn that valid local
+        # score into a shadow-only recommendation instead of failing closed.
+        # A full policy response also contains those core fields, therefore it
+        # must be distinguished before falling back to the legacy adapter.
+        if self._is_candidate_score_response(body):
+            return self._candidate_score_prediction(body, attempt_id)
 
         try:
             action = body.get("recommended_action")
@@ -228,6 +316,41 @@ class BehaviorAIClient:
         except (AttributeError, KeyError, TypeError, ValueError):
             return BehaviorPrediction(attempt_id, "error", "behavior_ai_invalid_response")
 
+    @staticmethod
+    def _is_candidate_score_response(body: Any) -> bool:
+        if not isinstance(body, dict):
+            return False
+        legacy_fields = {"human_score", "bot_risk_score", "model_name", "model_version"}
+        full_policy_fields = {"risk_score", "risk_level", "recommended_action", "policy_mode"}
+        return legacy_fields.issubset(body) and not full_policy_fields.issubset(body)
+
+    @staticmethod
+    def _candidate_score_prediction(body: dict[str, Any], attempt_id: str) -> BehaviorPrediction:
+        bot_risk = max(0.0, min(1.0, float(body["bot_risk_score"])))
+        risk_score = round(bot_risk * 100.0, 2)
+        if risk_score < 30:
+            risk_level, action = "low", "allow"
+        elif risk_score < 60:
+            risk_level, action = "medium", "step_up"
+        else:
+            risk_level, action = "high", "step_up_and_rate_limit"
+        return BehaviorPrediction(
+            attempt_id=attempt_id,
+            status="scored",
+            risk_score=risk_score,
+            risk_level=risk_level,
+            recommended_action=action,
+            # Candidate models never block traffic. The CAPTCHA policy remains
+            # shadow until a model has passed the promotion criteria.
+            policy_mode="shadow",
+            human_score=float(body["human_score"]),
+            bot_risk_score=bot_risk,
+            model_name=str(body["model_name"]),
+            model_version=str(body["model_version"]),
+            feature_schema_version=str(body.get("feature_schema_version", "1.0")),
+            reasons=("candidate_model_score",),
+        )
+
     def record_shadow_outcome(self, prediction: BehaviorPrediction, verdict: Literal["passed", "failed"]) -> BehaviorPrediction:
         if prediction.status != "scored" or prediction.policy_mode != "shadow":
             return prediction
@@ -240,7 +363,15 @@ class BehaviorAIClient:
                     "final_verdict": verdict,
                 },
             )
-        except (HTTPError, OSError, URLError, ValueError) as error:
+        except HTTPError as error:
+            # Older local candidate servers do not persist shadow outcomes.
+            # Their score is still valid for this CAPTCHA-side local test.
+            if error.code == 404:
+                return prediction
+            return BehaviorPrediction(
+                **{**prediction.__dict__, "detail": "shadow_outcome_failed:HTTPError"}
+            )
+        except (OSError, URLError, ValueError) as error:
             return BehaviorPrediction(
                 **{**prediction.__dict__, "detail": f"shadow_outcome_failed:{type(error).__name__}"}
             )
@@ -258,6 +389,19 @@ class BehaviorAIClient:
         )
         with self._opener(request, timeout=self.timeout_seconds) as response:
             return json.loads(response.read().decode("utf-8"))
+
+    def _get(self, path: str) -> Any:
+        request = Request(
+            self.base_url + path,
+            headers={"X-Captcha-Backend-Key": self.backend_key},
+            method="GET",
+        )
+        with self._opener(request, timeout=self.timeout_seconds) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+
+def _optional_string(value: Any) -> str | None:
+    return str(value) if isinstance(value, str) else None
 
 
 def resolve_final_verdict(
