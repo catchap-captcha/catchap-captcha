@@ -81,6 +81,7 @@ class ReviewRequest(BaseModel):
     review_status: Literal["labeled", "approved", "rejected", "needs_revision"]
     instruction_ko: str = Field(min_length=5, max_length=500)
     difficulty: int = Field(ge=1, le=5)
+    expected_target_count: int | None = Field(default=None, ge=0, le=50)
     objects: list[ReviewObject] = Field(min_length=1, max_length=20)
 
 
@@ -387,9 +388,12 @@ def admin_queue(view: Literal["pending", "approved", "rejected", "all"] = "pendi
 
 @app.post("/api/admin/claim/{queue_id}")
 def claim_item(queue_id: str, x_captcha_admin_key: str | None = Header(None)):
-    """현재 보고 있는 항목을 잠깐 선점(하트비트). 다른 검수자 목록에서 제외된다."""
+    """현재 보고 있는 항목을 잠깐 선점(하트비트). blocked=True면 다른 사람이 처리했거나 보는 중."""
     reviewer=require_admin(x_captcha_admin_key)
-    return {"held": database.touch_claim(queue_id, reviewer)}
+    held=database.touch_claim(queue_id, reviewer)
+    dec=database.get_decision(queue_id)
+    decided=bool(dec and dec.get("review_status") in ("approved","rejected"))
+    return {"held":held,"decided":decided,"blocked":(not held) or decided}
 
 
 @app.get("/api/admin/counts")
@@ -414,8 +418,9 @@ def save_review(queue_id: str, payload: ReviewRequest, x_captcha_admin_key: str 
     prior=database.get_decision(queue_id)
     if prior and prior["review_status"] in {"approved","rejected"} and prior["reviewer"]!=reviewer:
         raise HTTPException(409, f"이미 다른 검수자({prior['reviewer']})가 처리한 문항입니다.")
+    expected=payload.expected_target_count if payload.expected_target_count is not None else int(item["expected_target_count"])
     targets=sum(o.role=="target" for o in payload.objects)
-    if payload.review_status=="approved" and (targets!=int(item["expected_target_count"]) or any(o.role=="ambiguous" for o in payload.objects)):
+    if payload.review_status=="approved" and (targets!=expected or any(o.role=="ambiguous" for o in payload.objects)):
         raise HTTPException(422,"Approved labels must match expected target count and contain no ambiguous objects")
     existing_question_id=item.get("existing_question_id")
     question_id=(existing_question_id if existing_question_id else f"tq_{item['question_id']}") if payload.review_status=="approved" else None
