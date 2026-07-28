@@ -13,7 +13,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, Header, HTTPException, Request, status
+from fastapi import FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -91,6 +91,14 @@ def hash_value(value: str) -> str:
 def require_header(actual: str | None, expected: str, message: str) -> None:
     if not actual or not hmac.compare_digest(actual, expected):
         raise HTTPException(status_code=401, detail=message)
+
+
+def require_admin(admin_key: str | None) -> str:
+    """관리자 키를 검증하고 해당 검수자 이름을 반환한다. 유효하지 않으면 401."""
+    reviewer = settings.reviewer_for_key(admin_key)
+    if not reviewer:
+        raise HTTPException(status_code=401, detail="Invalid admin key")
+    return reviewer
 
 
 def client_ip(request: Request) -> str:
@@ -203,6 +211,34 @@ def queue_rows(view: str = "pending") -> list[dict]:
         if view in {"approved", "rejected"} and status != view: continue
         pending.append(review if review else row)
     return pending
+
+
+def load_queue_candidates() -> list[dict]:
+    """검수 대상 후보 원본(queue.jsonl)을 필터 없이 그대로 읽는다."""
+    path = settings.labeling_dir / "queue.jsonl"
+    if not path.exists(): return []
+    return [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+
+
+def find_candidate(queue_id: str) -> dict | None:
+    for row in load_queue_candidates():
+        if str(row["queue_id"]) == queue_id: return row
+    for row in queue_rows("all"):
+        if str(row["queue_id"]) == queue_id: return row
+    return None
+
+
+def candidate_state(row: dict, decisions: dict, active_ids: set) -> str | None:
+    """후보의 확정 상태: 'approved'/'rejected'/'labeled' 또는 None(미검수)."""
+    qid = str(row["queue_id"])
+    d = decisions.get(qid)
+    if d and d.get("review_status") in ("approved", "rejected", "labeled", "needs_revision"):
+        return d["review_status"]
+    # 레거시: DB에는 이미 활성 등록됐지만 결정 기록이 없는 승인분
+    ex = row.get("existing_question_id")
+    if ex and str(ex) in active_ids: return "approved"
+    if f"tq_{row.get('question_id')}" in active_ids: return "approved"
+    return None
 
 
 def append_final_manifest(question: dict, objects: list[dict]) -> None:
@@ -330,24 +366,56 @@ def signup(payload: SignupRequest):
 @app.get("/api/admin/queue")
 def admin_queue(view: Literal["pending", "approved", "rejected", "all"] = "pending",
                 x_captcha_admin_key: str | None = Header(None)):
-    require_header(x_captcha_admin_key,settings.admin_key,"Invalid admin key"); return {"items":queue_rows(view),"view":view}
+    reviewer=require_admin(x_captcha_admin_key)
+    decisions=database.decision_map(); active_ids=database.active_question_ids()
+    counts=database.review_counts()
+    candidates=load_queue_candidates()
+    if view=="pending":
+        others=database.others_claimed_ids(reviewer)
+        rows=[r for r in candidates
+              if candidate_state(r,decisions,active_ids) not in ("approved","rejected")
+              and str(r["queue_id"]) not in others]
+        # 한 번도 검수 안 한 항목(결정 기록 없음)을 먼저, 임시저장 등은 뒤로.
+        rows.sort(key=lambda r: 1 if str(r["queue_id"]) in decisions else 0)
+        items=rows
+    elif view in ("approved","rejected"):
+        items=[r for r in candidates if candidate_state(r,decisions,active_ids)==view]
+    else:
+        items=candidates
+    return {"items":items,"view":view,"reviewer":reviewer,"counts":counts}
+
+
+@app.post("/api/admin/claim/{queue_id}")
+def claim_item(queue_id: str, x_captcha_admin_key: str | None = Header(None)):
+    """현재 보고 있는 항목을 잠깐 선점(하트비트). 다른 검수자 목록에서 제외된다."""
+    reviewer=require_admin(x_captcha_admin_key)
+    return {"held": database.touch_claim(queue_id, reviewer)}
 
 
 @app.get("/api/admin/assets/{path:path}")
 def admin_asset(path: str, x_captcha_admin_key: str | None = Header(None)):
-    require_header(x_captcha_admin_key,settings.admin_key,"Invalid admin key")
+    require_admin(x_captcha_admin_key)
     return FileResponse(safe_asset(settings.labeling_dir,path))
 
 
 @app.put("/api/admin/reviews/{queue_id}")
 def save_review(queue_id: str, payload: ReviewRequest, x_captcha_admin_key: str | None = Header(None)):
-    require_header(x_captcha_admin_key,settings.admin_key,"Invalid admin key")
-    item=next((row for row in queue_rows("all") if row["queue_id"]==queue_id),None)
+    reviewer=require_admin(x_captcha_admin_key)
+    item=find_candidate(queue_id)
     if not item or payload.queue_id!=queue_id: raise HTTPException(404,"Queue item not found")
+    # 선점 우선: 이미 다른 검수자가 승인/제외한 문항이면 막는다.
+    prior=database.get_decision(queue_id)
+    if prior and prior["review_status"] in {"approved","rejected"} and prior["reviewer"]!=reviewer:
+        raise HTTPException(409, f"이미 다른 검수자({prior['reviewer']})가 처리한 문항입니다.")
     targets=sum(o.role=="target" for o in payload.objects)
     if payload.review_status=="approved" and (targets!=int(item["expected_target_count"]) or any(o.role=="ambiguous" for o in payload.objects)):
         raise HTTPException(422,"Approved labels must match expected target count and contain no ambiguous objects")
-    now=utcnow(); review={**item,**payload.model_dump(),"reviewed_at":now.isoformat()+"Z"}
+    existing_question_id=item.get("existing_question_id")
+    question_id=(existing_question_id if existing_question_id else f"tq_{item['question_id']}") if payload.review_status=="approved" else None
+    # 원자적 선점 저장(DB 단일 소스): 먼저 잡은 사람만 통과.
+    if not database.record_decision(queue_id, payload.review_status, reviewer, question_id):
+        raise HTTPException(409, "이미 다른 검수자가 처리한 문항입니다.")
+    now=utcnow(); review={**item,**payload.model_dump(),"reviewer":reviewer,"reviewed_at":now.isoformat()+"Z"}
     reviewed=settings.labeling_dir/"reviewed.jsonl"
     with reviewed.open("a",encoding="utf-8") as fp: fp.write(json.dumps(review,ensure_ascii=False)+"\n")
     if payload.review_status=="approved":
@@ -361,7 +429,7 @@ def save_review(queue_id: str, payload: ReviewRequest, x_captcha_admin_key: str 
                 original=existing_objects.get(str(obj.object_key))
                 object_rows.append({**obj.model_dump(),"piece_path":original.get("piece_path") if original else None})
             question={**existing,"instruction_ko":payload.instruction_ko,"difficulty":payload.difficulty,
-                "status":"active","review_status":"approved","reviewer":payload.reviewer,"reviewed_at":now}
+                "status":"active","review_status":"approved","reviewer":reviewer,"reviewed_at":now}
             database.upsert_question(question,object_rows)
             append_final_manifest(question,object_rows)
             return {"saved":True,"status":payload.review_status}
@@ -398,9 +466,11 @@ def save_review(queue_id: str, payload: ReviewRequest, x_captcha_admin_key: str 
             "instruction_en":item.get("question_en"),"source":"tallyqa_visual_genome",
             "source_question_id":str(item["question_id"]),"image_path":str(final_image.relative_to(settings.final_dir)),
             "image_width":width,"image_height":height,"difficulty":payload.difficulty,"status":"active",
-            "review_status":"approved","reviewer":payload.reviewer,"reviewed_at":now,"created_at":now}
+            "review_status":"approved","reviewer":reviewer,"reviewed_at":now,"created_at":now}
         database.upsert_question(question,object_rows)
         append_final_manifest(question, object_rows)
+    # 검수를 끝냈으니 '보는 중' 잠금은 해제(결정 자체는 DB에 영구 저장됨).
+    database.release_review_claim(queue_id,reviewer)
     return {"saved":True,"status":payload.review_status}
 
 

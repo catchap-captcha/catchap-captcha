@@ -15,6 +15,12 @@ const sessionId = () => {
   return value;
 };
 
+const reviewerId = () => {
+  let value = sessionStorage.getItem("captcha-reviewer");
+  if (!value) { value = `reviewer-${crypto.randomUUID()}`; sessionStorage.setItem("captcha-reviewer", value); }
+  return value;
+};
+
 function CaptchaApp() {
   const [challenge, setChallenge] = useState(null);
   const [siteKey, setSiteKey] = useState("");
@@ -145,10 +151,14 @@ function AdminApp() {
   const [view,setView]=useState("pending");
   const [draft,setDraft]=useState(null); const [message,setMessage]=useState("관리자 키를 입력하세요.");
   const [selectedObjectKey,setSelectedObjectKey]=useState(null);
+  const [reviewerName,setReviewerName]=useState(""); const [counts,setCounts]=useState({approved:0,rejected:0});
   const canvasRef=useRef(null); const editRef=useRef(null);
   const item=items[index];
-  const load=async(nextView)=>{ const requested=typeof nextView==="string"?nextView:view; try { const data=await api(`/api/admin/queue?view=${requested}`,{headers:{"X-Captcha-Admin-Key":key}}); setView(requested); setItems(data.items); setIndex(0); setDraft(data.items[0]||null); setMessage(`${data.items.length}개 ${requested==="approved"?"승인 완료":"승인 대기"} 문항을 불러왔습니다.`); } catch(error){setMessage(error.message);} };
+  const load=async(nextView)=>{ const requested=typeof nextView==="string"?nextView:view; try { const data=await api(`/api/admin/queue?view=${requested}`,{headers:{"X-Captcha-Admin-Key":key}}); setView(requested); setItems(data.items); setIndex(0); setDraft(data.items[0]||null); if(data.reviewer) setReviewerName(data.reviewer); if(data.counts) setCounts(data.counts); const label=requested==="approved"?"승인 완료":requested==="rejected"?"제외":"승인 대기"; setMessage(`${data.items.length}개 ${label} 문항을 불러왔습니다.`); } catch(error){setMessage(error.message);} };
+  const advance=()=>{ const remaining=items.filter((row)=>row.queue_id!==draft.queue_id); if(!remaining.length){load(view);return;} setItems(remaining); setIndex(Math.min(index,remaining.length-1)); };
   useEffect(()=>{ if(item) setDraft(structuredClone(item)); },[index,items]);
+  const currentQid=item?.queue_id;
+  useEffect(()=>{ if(!currentQid||!key||view!=="pending") return; const ping=()=>fetch(`/api/admin/claim/${currentQid}`,{method:"POST",headers:{"X-Captcha-Admin-Key":key}}).catch(()=>{}); ping(); const t=setInterval(ping,60000); return ()=>clearInterval(t); },[currentQid,key,view]);
   const updateObject=(objectKey,patch)=>setDraft((current)=>({...current,objects:current.objects.map((obj)=>obj.object_key===objectKey?{...obj,...patch}:obj)}));
   const clamp=(value,min,max)=>Math.min(max,Math.max(min,value));
   const beginBoxEdit=(event,obj,mode)=>{ event.preventDefault(); event.stopPropagation(); event.currentTarget.setPointerCapture(event.pointerId); setSelectedObjectKey(obj.object_key); editRef.current={objectKey:obj.object_key,mode,startX:event.clientX,startY:event.clientY,box:{x:obj.x,y:obj.y,width:obj.width,height:obj.height}}; };
@@ -161,11 +171,11 @@ function AdminApp() {
     updateObject(edit.objectKey,{x:+x.toFixed(6),y:+y.toFixed(6),width:+width.toFixed(6),height:+height.toFixed(6)});
   };
   const endBoxEdit=()=>{editRef.current=null;};
-  const save=async(status)=>{ try { await api(`/api/admin/reviews/${draft.queue_id}`,{method:"PUT",headers:{"Content-Type":"application/json","X-Captcha-Admin-Key":key},body:JSON.stringify({queue_id:draft.queue_id,reviewer:"admin",review_status:status,instruction_ko:draft.instruction_ko,difficulty:draft.difficulty||2,objects:draft.objects})}); setMessage(`${status} 상태로 저장했습니다.`); if(view==="pending"&&(status==="approved"||status==="rejected")){const remaining=items.filter((row)=>row.queue_id!==draft.queue_id);setItems(remaining);setIndex(Math.min(index,Math.max(0,remaining.length-1)));if(!remaining.length)setDraft(null);}else if(index<items.length-1)setIndex(index+1); } catch(error){setMessage(error.message);} };
+  const save=async(status)=>{ try { await api(`/api/admin/reviews/${draft.queue_id}`,{method:"PUT",headers:{"Content-Type":"application/json","X-Captcha-Admin-Key":key},body:JSON.stringify({queue_id:draft.queue_id,reviewer:"web",review_status:status,instruction_ko:draft.instruction_ko,difficulty:draft.difficulty||2,objects:draft.objects})}); setMessage(`${status} 상태로 저장했습니다.`); if(status==="approved"||status==="rejected"){advance();}else if(index<items.length-1)setIndex(index+1); } catch(error){ setMessage(error.message); if(/이미|처리 중/.test(error.message)) advance(); } };
   const addBox=()=>{const object_key=`manual_${crypto.randomUUID().slice(0,8)}`;setDraft({...draft,objects:[...draft.objects,{object_key,label:"새 객체",x:.35,y:.25,width:.2,height:.35,role:"ambiguous"}]});setSelectedObjectKey(object_key);};
   if(!items.length)return <main className="admin-login"><div className="brand-mark">C</div><h1>라벨링 콘솔</h1><p>{message}</p><input type="password" value={key} onChange={(e)=>setKey(e.target.value)} placeholder="관리자 키"/><button className="primary" onClick={load}>후보 불러오기</button><a href="/">사용자 화면으로</a></main>;
   const targetCount=draft.objects.filter((obj)=>obj.role==="target").length;
-  return <main className="admin-shell"><header className="admin-head"><div><p className="kicker">LABELING CONSOLE</p><h1>객체 관계 검수</h1></div><div><button className="outline" onClick={()=>load("pending")}>승인 대기</button><button className="outline" onClick={()=>load("approved")}>승인 완료</button><span>{index+1} / {items.length}</span><a href="/">사용자 화면</a></div></header>
+  return <main className="admin-shell"><header className="admin-head"><div><p className="kicker">LABELING CONSOLE</p><h1>객체 관계 검수</h1></div><div><button className="outline" onClick={()=>load("pending")}>승인 대기</button><button className="outline" onClick={()=>load("approved")}>승인 완료</button><button className="outline" onClick={()=>load("rejected")}>제외</button><span>{reviewerName?`${reviewerName} · `:""}승인 {counts.approved} · 제외 {counts.rejected} · {index+1}/{items.length}</span><a href="/">사용자 화면</a></div></header>
     <section className="review-grid"><div className="review-canvas" ref={canvasRef} onPointerMove={moveBox} onPointerUp={endBoxEdit} onPointerCancel={endBoxEdit}><AdminImage path={draft.image_path} adminKey={key}/>
       {draft.objects.map((obj)=><div key={obj.object_key} className={`bbox ${obj.role} ${selectedObjectKey===obj.object_key?"selected":""}`} style={{left:`${obj.x*100}%`,top:`${obj.y*100}%`,width:`${obj.width*100}%`,height:`${obj.height*100}%`}} onPointerDown={(e)=>beginBoxEdit(e,obj,"move")}><span>{obj.label} · {obj.role}</span>{["nw","ne","sw","se"].map((corner)=><i key={corner} className={`resize-handle ${corner}`} onPointerDown={(e)=>beginBoxEdit(e,obj,corner)} />)}</div>)}</div>
       <aside><p className="question-en">{draft.question_en}</p><textarea value={draft.instruction_ko} onChange={(e)=>setDraft({...draft,instruction_ko:e.target.value})}/><div className="target-count"><span>target 수</span><strong className={targetCount===draft.expected_target_count?"match":""}>{targetCount} / {draft.expected_target_count}</strong></div><p className="hint">관계 힌트: {draft.relationship_hints?.map((r)=>r.predicate).join(", ")||"없음 — 육안 검수 필요"}</p><p className="edit-help">박스를 드래그해 이동하고, 네 모서리를 잡아 크기를 조절하세요.</p><button className="outline" onClick={addBox}>+ 새 bbox</button></aside></section>

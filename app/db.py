@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -74,6 +74,16 @@ SCHEMA = [
       id CHAR(36) PRIMARY KEY, email VARCHAR(320) NOT NULL UNIQUE,
       password_hash VARCHAR(255) NOT NULL, created_at DATETIME(6) NOT NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+    """CREATE TABLE IF NOT EXISTS captcha_review_claims (
+      queue_id VARCHAR(128) PRIMARY KEY, reviewer_id VARCHAR(128) NOT NULL,
+      claimed_at DATETIME(6) NOT NULL, expires_at DATETIME(6) NOT NULL,
+      INDEX idx_review_claim_reviewer(reviewer_id), INDEX idx_review_claim_expiry(expires_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+    """CREATE TABLE IF NOT EXISTS captcha_review_decisions (
+      queue_id VARCHAR(160) PRIMARY KEY, review_status VARCHAR(24) NOT NULL,
+      reviewer VARCHAR(128) NULL, question_id VARCHAR(64) NULL, reviewed_at DATETIME(6) NOT NULL,
+      INDEX idx_review_decision_status(review_status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
 ]
 
 
@@ -92,7 +102,8 @@ class Database:
             autocommit=autocommit, connect_timeout=5,
         )
         socket_path = Path(self.settings.db_unix_socket)
-        if socket_path.exists(): kwargs["unix_socket"] = str(socket_path)
+        local_hosts={"localhost","127.0.0.1","::1"}
+        if self.settings.db_host in local_hosts and socket_path.exists(): kwargs["unix_socket"] = str(socket_path)
         else: kwargs.update(host=self.settings.db_host, port=self.settings.db_port)
         return pymysql.connect(**kwargs)
 
@@ -195,6 +206,112 @@ class Database:
         with self.connection() as conn, conn.cursor() as cur:
             cur.execute("INSERT INTO captcha_users(id,email,password_hash,created_at) VALUES(%s,%s,%s,%s)",
                         (user_id,email,password_hash,utcnow())); conn.commit()
+
+    def claim_review_batch(self, queue_ids: list[str], reviewer_id: str, batch_size: int = 50,
+                           lease_minutes: int = 120) -> set[str]:
+        now=utcnow(); expires=now+timedelta(minutes=lease_minutes)
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM captcha_review_claims WHERE expires_at<=%s", (now,))
+            cur.execute("""SELECT queue_id FROM captcha_review_claims
+              WHERE reviewer_id=%s AND expires_at>%s ORDER BY claimed_at LIMIT %s""",
+              (reviewer_id,now,batch_size))
+            claimed={str(row["queue_id"]) for row in cur.fetchall()}
+            for queue_id in queue_ids:
+                if len(claimed)>=batch_size: break
+                cur.execute("""INSERT IGNORE INTO captcha_review_claims
+                  (queue_id,reviewer_id,claimed_at,expires_at) VALUES(%s,%s,%s,%s)""",
+                  (queue_id,reviewer_id,now,expires))
+                if cur.rowcount: claimed.add(queue_id)
+            conn.commit()
+        return claimed
+
+    def claim_decision(self, queue_id: str, reviewer_id: str, lease_minutes: int = 120) -> bool:
+        """검수 확정 순간의 원자적 선점 잠금. 먼저 잡은 사람만 True.
+        이미 같은 사람이 잡고 있으면 True(재저장 허용), 다른 사람이면 False."""
+        now = utcnow(); expires = now + timedelta(minutes=lease_minutes)
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM captcha_review_claims WHERE expires_at<=%s", (now,))
+            cur.execute("""INSERT IGNORE INTO captcha_review_claims
+              (queue_id,reviewer_id,claimed_at,expires_at) VALUES(%s,%s,%s,%s)""",
+              (queue_id, reviewer_id, now, expires))
+            if cur.rowcount == 1:
+                conn.commit(); return True
+            cur.execute("SELECT reviewer_id FROM captcha_review_claims WHERE queue_id=%s", (queue_id,))
+            row = cur.fetchone(); conn.commit()
+            return bool(row) and str(row["reviewer_id"]) == reviewer_id
+
+    def release_review_claim(self, queue_id: str, reviewer_id: str | None = None) -> None:
+        with self.connection() as conn, conn.cursor() as cur:
+            if reviewer_id:
+                cur.execute("DELETE FROM captcha_review_claims WHERE queue_id=%s AND reviewer_id=%s",
+                            (queue_id,reviewer_id))
+            else:
+                cur.execute("DELETE FROM captcha_review_claims WHERE queue_id=%s", (queue_id,))
+            conn.commit()
+
+    # ---- 검수 결정: DB를 단일 소스로 사용 ----
+    def decision_map(self) -> dict[str, dict[str, Any]]:
+        """{queue_id: {'review_status':..., 'reviewer':...}} 전체 결정 맵."""
+        with self.connection(True) as conn, conn.cursor() as cur:
+            cur.execute("SELECT queue_id,review_status,reviewer FROM captcha_review_decisions")
+            return {str(r["queue_id"]): r for r in cur.fetchall()}
+
+    def get_decision(self, queue_id: str) -> dict[str, Any] | None:
+        with self.connection(True) as conn, conn.cursor() as cur:
+            cur.execute("SELECT queue_id,review_status,reviewer FROM captcha_review_decisions WHERE queue_id=%s", (queue_id,))
+            return cur.fetchone()
+
+    def active_question_ids(self) -> set[str]:
+        """이미 캡챠에 활성 등록된 문항 id 집합(중복 승인 방지용)."""
+        with self.connection(True) as conn, conn.cursor() as cur:
+            cur.execute("SELECT id FROM captcha_questions WHERE status='active' AND review_status='approved'")
+            return {str(r["id"]) for r in cur.fetchall()}
+
+    def review_counts(self) -> dict[str, int]:
+        with self.connection(True) as conn, conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) n FROM captcha_questions WHERE status='active' AND review_status='approved'")
+            approved = int(cur.fetchone()["n"])
+            cur.execute("SELECT COUNT(*) n FROM captcha_review_decisions WHERE review_status='rejected'")
+            rejected = int(cur.fetchone()["n"])
+            return {"approved": approved, "rejected": rejected}
+
+    def record_decision(self, queue_id: str, review_status: str, reviewer: str, question_id: str | None = None) -> bool:
+        """원자적 선점 저장. 이미 다른 검수자가 승인/제외했으면 False."""
+        now = utcnow()
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute("SELECT review_status,reviewer FROM captcha_review_decisions WHERE queue_id=%s FOR UPDATE", (queue_id,))
+            row = cur.fetchone()
+            if row and row["review_status"] in ("approved", "rejected") and row["reviewer"] != reviewer:
+                conn.commit(); return False
+            cur.execute("""INSERT INTO captcha_review_decisions(queue_id,review_status,reviewer,question_id,reviewed_at)
+              VALUES(%s,%s,%s,%s,%s)
+              ON DUPLICATE KEY UPDATE review_status=VALUES(review_status),reviewer=VALUES(reviewer),
+                question_id=VALUES(question_id),reviewed_at=VALUES(reviewed_at)""",
+              (queue_id, review_status, reviewer, question_id, now))
+            conn.commit(); return True
+
+    def others_claimed_ids(self, reviewer_id: str) -> set[str]:
+        """지금 다른 검수자가 보고 있는(claim) 항목 집합."""
+        now = utcnow()
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM captcha_review_claims WHERE expires_at<=%s", (now,))
+            conn.commit()
+            cur.execute("SELECT queue_id FROM captcha_review_claims WHERE reviewer_id<>%s AND expires_at>%s", (reviewer_id, now))
+            return {str(r["queue_id"]) for r in cur.fetchall()}
+
+    def touch_claim(self, queue_id: str, reviewer_id: str, ttl_minutes: int = 3) -> bool:
+        """현재 보고 있는 항목을 잠깐 선점(하트비트). 내가 잡으면 True, 남이 잡고 있으면 False."""
+        now = utcnow(); expires = now + timedelta(minutes=ttl_minutes)
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM captcha_review_claims WHERE expires_at<=%s", (now,))
+            cur.execute("INSERT IGNORE INTO captcha_review_claims(queue_id,reviewer_id,claimed_at,expires_at) VALUES(%s,%s,%s,%s)",
+                        (queue_id, reviewer_id, now, expires))
+            if cur.rowcount == 1:
+                conn.commit(); return True
+            cur.execute("UPDATE captcha_review_claims SET expires_at=%s WHERE queue_id=%s AND reviewer_id=%s",
+                        (expires, queue_id, reviewer_id))
+            mine = cur.rowcount == 1
+            conn.commit(); return mine
 
     def upsert_question(self, question: dict[str, Any], objects: list[dict[str, Any]]) -> None:
         with self.connection() as conn, conn.cursor() as cur:
