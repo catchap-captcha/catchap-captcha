@@ -28,9 +28,11 @@ settings.validate()
 
 
 class ChallengeCreate(BaseModel):
-    purpose: Literal["signup", "login", "recovery"] = "signup"
+    purpose: Literal["signup", "login", "recovery", "lecture"] = "signup"
     risk_level: Literal["low", "medium", "high"] = "medium"
     session_id: str = Field(min_length=8, max_length=128)
+    lecture_id: str | None = Field(default=None, max_length=128)
+    playback_position: float | None = Field(default=None, ge=0)
 
 
 class BehaviorEvent(BaseModel):
@@ -54,6 +56,13 @@ class SignupRequest(BaseModel):
     password: str = Field(min_length=10, max_length=256)
     captcha_token: str = Field(min_length=32, max_length=256)
     session_id: str = Field(min_length=8, max_length=128)
+
+
+class VerifyTokenRequest(BaseModel):
+    token: str = Field(min_length=32, max_length=256)
+    session_id: str = Field(min_length=8, max_length=128)
+    lecture_id: str | None = Field(default=None, max_length=128)
+    purpose: Literal["signup", "login", "recovery", "lecture"] = "lecture"
 
 
 class ReviewObject(BaseModel):
@@ -301,7 +310,7 @@ def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_
     mappings = [(obj["id"], f"tmp_{secrets.token_urlsafe(8)}") for obj in question["objects"] if obj["role"] != "invalid"]
     temporary = {object_id: temp for object_id, temp in mappings}
     database.create_challenge({"id":challenge_id,"question_id":question["id"],"session_id":payload.session_id,
-        "purpose":payload.purpose,"expires_at":expires,"created_at":now,"client_ip_hash":ip_hash}, mappings)
+        "purpose":payload.purpose,"lecture_id":payload.lecture_id,"expires_at":expires,"created_at":now,"client_ip_hash":ip_hash}, mappings)
     objects = [{"object_id":temporary[obj["id"]], "hit_region":[obj["bbox_x"],obj["bbox_y"],obj["bbox_width"],obj["bbox_height"]],
                 "preview_url":f"/api/captcha/assets/{challenge_id}/{temporary[obj['id']]}"}
                for obj in question["objects"] if obj["id"] in temporary]
@@ -351,8 +360,18 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
     if summary["risk_score"]>=settings.behavior_step_up_score:
         return {"success":False,"step_up":True,"risk_level":summary["risk_level"]}
     token=secrets.token_urlsafe(32); database.create_token(challenge_id,hash_value(token),challenge["purpose"],payload.session_id,
-                                                         utcnow()+timedelta(seconds=settings.verification_ttl_seconds))
+                                                         utcnow()+timedelta(seconds=settings.verification_ttl_seconds),challenge.get("lecture_id"))
     return {"success":True,"captcha_token":token,"expires_in":settings.verification_ttl_seconds}
+
+
+@app.post("/api/verify-token")
+def verify_token(payload: VerifyTokenRequest, x_captcha_site_secret: str | None = Header(None)):
+    """서버-투-서버 토큰 검증. 호스트(인강) 서버가 사이트 시크릿으로 호출한다."""
+    require_header(x_captcha_site_secret, settings.site_secret, "Invalid site secret")
+    result = database.verify_token(hash_value(payload.token), payload.purpose, payload.session_id, payload.lecture_id)
+    if not result:
+        return {"success": False, "error": "invalid_or_used_token"}
+    return {"success": True, "lecture_id": result.get("lecture_id"), "challenge_id": result.get("challenge_id")}
 
 
 @app.post("/api/signup", status_code=201)

@@ -34,6 +34,10 @@ function CaptchaApp() {
   const stageRef = useRef(null);
   const dropRef = useRef(null);
   const lastMove = useRef(0);
+  const embedParams = new URLSearchParams(location.search);
+  const embed = embedParams.get("embed") === "1";
+  const lectureId = embedParams.get("lecture") || embedParams.get("lecture_id") || null;
+  const purpose = embedParams.get("purpose") || (embed ? "lecture" : "signup");
 
   const record = (type, objectId, event) => {
     const now = Date.now();
@@ -52,7 +56,7 @@ function CaptchaApp() {
       const config = siteKey ? { siteKey } : await api("/api/config");
       setSiteKey(config.siteKey);
       const row = await api("/api/captcha/challenges", { method: "POST", headers: { "Content-Type": "application/json", "X-Captcha-Site-Key": config.siteKey },
-        body: JSON.stringify({ purpose: "signup", risk_level: "high", session_id: sessionId() }) });
+        body: JSON.stringify({ purpose, risk_level: "high", session_id: sessionId(), lecture_id: lectureId }) });
       setChallenge(row); setStartedAt(performance.now()); setMessage(row.instruction);
       setEvents([{ type: "challenge_loaded", object_id: null, x: null, y: null, timestamp_ms: Date.now() }]);
     } catch (error) { setMessage(error.message); }
@@ -90,6 +94,7 @@ function CaptchaApp() {
       if (result.success) {
         setToken(result.captcha_token);
         setMessage("인증되었습니다.");
+        if (embed && window.parent !== window) window.parent.postMessage({ type: "catchap-verified", token: result.captcha_token, lecture_id: lectureId }, "*");
         return;
       }
       setMessage(result.blocked?"자동화 의심 행동이 감지되었습니다.":result.step_up?"추가 인증이 필요합니다.":"인증에 실패하였습니다.");
