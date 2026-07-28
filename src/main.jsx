@@ -31,6 +31,8 @@ function CaptchaApp() {
   const [token, setToken] = useState("");
   const [events, setEvents] = useState([]);
   const [startedAt, setStartedAt] = useState(0);
+  const [remaining, setRemaining] = useState(60);
+  const deadlineRef = useRef(0);
   const stageRef = useRef(null);
   const dropRef = useRef(null);
   const lastMove = useRef(0);
@@ -58,10 +60,20 @@ function CaptchaApp() {
       const row = await api("/api/captcha/challenges", { method: "POST", headers: { "Content-Type": "application/json", "X-Captcha-Site-Key": config.siteKey },
         body: JSON.stringify({ purpose, risk_level: "high", session_id: sessionId(), lecture_id: lectureId }) });
       setChallenge(row); setStartedAt(performance.now()); setMessage(row.instruction);
+      deadlineRef.current = Date.now() + 60000; setRemaining(60);
       setEvents([{ type: "challenge_loaded", object_id: null, x: null, y: null, timestamp_ms: Date.now() }]);
     } catch (error) { setMessage(error.message); }
   };
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (!challenge || token) return;
+    const id = setInterval(() => {
+      const rem = Math.max(0, Math.ceil((deadlineRef.current - Date.now()) / 1000));
+      setRemaining(rem);
+      if (rem <= 0) { clearInterval(id); setMessage("시간이 초과되었습니다. 새 문제를 불러옵니다."); window.setTimeout(load, 1200); }
+    }, 250);
+    return () => clearInterval(id);
+  }, [challenge, token]);
 
   const moveDrag = (event) => {
     if (!dragging) return;
@@ -117,7 +129,7 @@ function CaptchaApp() {
       </div>
 
       <div className="cc-main">
-        <div className="cc-rowhead"><span className="cc-tag">문제</span><button className="cc-link" onClick={load}>문제 바꾸기</button></div>
+        <div className="cc-rowhead"><span className="cc-tag">문제</span><span className="cc-rowright"><span className={`cc-timer ${remaining<=10?"warn":""}`}>⏱ {Math.floor(remaining/60)}:{String(remaining%60).padStart(2,"0")}</span><button className="cc-link" onClick={load}>문제 바꾸기</button></span></div>
         <div className={`cc-stage ${challenge ? "loaded" : ""}`} ref={stageRef} onPointerMove={moveDrag} onPointerUp={drop} onPointerCancel={()=>{setDragging(null);setDragPoint(null);}}>
           {challenge ? <>
             <img src={challenge.image_url} alt="CAPTCHA 원본 장면" draggable="false" />
@@ -144,7 +156,7 @@ function CaptchaApp() {
       <div className="cc-bottom">
         {token
           ? <div className="cc-done" role="status">확인되었습니다 · 잠시 후 이어집니다</div>
-          : <button className="cc-verify" onClick={verify} disabled={!challenge || !selected.length}>확인</button>}
+          : <button className="cc-verify" onClick={verify} disabled={!challenge || !selected.length || remaining<=0}>확인</button>}
         <div className="cc-guard"><span>이 확인은 <strong>CatChap Guard</strong>로 보호됩니다</span><a className="cc-admin-link" href="/admin">라벨링 콘솔</a></div>
       </div>
     </div>

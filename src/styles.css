@@ -29,6 +29,9 @@
 .cc-sub{margin:0;font-size:23px;color:#1d1d1f;font-weight:800;line-height:1.35;letter-spacing:-.02em}
 .cc-main{padding:28px 36px 0}
 .cc-rowhead{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.cc-rowright{display:flex;align-items:center;gap:12px}
+.cc-timer{font-size:12px;font-weight:700;color:#1d1d1f;background:#f0f0f2;border-radius:999px;padding:4px 10px;font-variant-numeric:tabular-nums}
+.cc-timer.warn{color:#fff;background:#e0564a}
 .cc-tag{font-size:12px;font-weight:600;color:#86868b;letter-spacing:.06em;text-transform:uppercase}
 .cc-link{border:none;background:none;padding:6px 0;font-size:13px;font-weight:600;color:#1d1d1f;cursor:pointer;font-family:inherit;letter-spacing:-.01em}
 .cc-link:hover{color:#86868b}
