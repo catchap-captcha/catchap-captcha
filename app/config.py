@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Literal
 from pathlib import Path
+from typing import Literal
 
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -50,6 +51,14 @@ class Settings:
     max_attempts: int = int(os.getenv("MAX_ATTEMPTS", "3"))
     max_challenges_per_minute: int = int(os.getenv("MAX_CHALLENGES_PER_MINUTE", "30"))
     max_telemetry_failures_10m: int = int(os.getenv("MAX_TELEMETRY_FAILURES_10M", "3"))
+    rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "300"))
+    behavior_step_up_score: int = int(os.getenv("BEHAVIOR_STEP_UP_SCORE", "30"))
+    behavior_block_score: int = int(os.getenv("BEHAVIOR_BLOCK_SCORE", "80"))
+    cluster_block_size: int = int(os.getenv("CLUSTER_BLOCK_SIZE", "7"))
+    cluster_window_hours: int = int(os.getenv("CLUSTER_WINDOW_HOURS", "24"))
+    rotation_cooldown_seconds: int = int(os.getenv("ROTATION_COOLDOWN_SECONDS", "300"))
+    pow_enabled: bool = os.getenv("POW_ENABLED", "1") == "1"
+    pow_difficulty_bits: int = int(os.getenv("POW_DIFFICULTY_BITS", "17"))
     # The behavior model runs as a separate internal service. Browser clients
     # never receive this key and cannot call the model directly.
     behavior_ai_url: str = os.getenv("BEHAVIOR_AI_URL", "")

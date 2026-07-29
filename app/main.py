@@ -7,7 +7,9 @@ import math
 import os
 import secrets
 import shutil
+import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -15,7 +17,7 @@ from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -28,9 +30,12 @@ from .behavior_client import (
 )
 from .config import settings
 from .db import Database, utcnow
+from .behavior_client import BehaviorAIClient, behavior_attempt_id, build_predict_payload, resolve_final_verdict
 
 
 database = Database(settings)
+# 행동 AI 브릿지. URL/키가 비면 enabled=False → 캡챠 판정에 영향 없음.
+behavior_ai = BehaviorAIClient(settings.behavior_ai_url, settings.behavior_ai_backend_key, settings.behavior_ai_timeout_seconds)
 settings.validate()
 behavior_ai = BehaviorAIClient(
     settings.behavior_ai_url,
@@ -73,6 +78,8 @@ class VerifyRequest(BaseModel):
     session_id: str = Field(min_length=8, max_length=128)
     duration_ms: int = Field(ge=100, le=180000)
     events: list[BehaviorEvent] = Field(default_factory=list, max_length=600)
+    client_signals: dict | None = Field(default=None)
+    pow_nonce: str | None = Field(default=None, max_length=64)
 
 
 class SignupRequest(BaseModel):
@@ -135,6 +142,46 @@ def require_admin(admin_key: str | None) -> str:
     return reviewer
 
 
+def _leading_zero_bits(digest: bytes) -> int:
+    """바이트열의 선행 0비트 수."""
+    n = 0
+    for b in digest:
+        if b == 0:
+            n += 8; continue
+        n += 8 - b.bit_length(); break
+    return n
+
+
+def pow_verify(seed: str, nonce: str | None, bits: int) -> bool:
+    """Proof-of-Work 검증: sha256(seed:nonce)의 선행 0비트가 요구치 이상이어야 통과.
+    봇이 챌린지마다 연산비용을 치르게 해 대량공격의 경제성을 깨뜨린다. 서버검증은 sha256 1회로 저렴."""
+    if not nonce or not isinstance(nonce, str):
+        return False
+    digest = hashlib.sha256(f"{seed}:{nonce}".encode()).digest()
+    return _leading_zero_bits(digest) >= bits
+
+
+def automation_score(sig: dict | None) -> int:
+    """자동화 브라우저 신호 점수. webdriver/헤드리스는 순정 자동화의 강한 흔적."""
+    if not isinstance(sig, dict): return 0
+    s = 0
+    if sig.get("webdriver"): s += 80
+    if sig.get("headlessUA"): s += 80
+    if sig.get("languages", 1) == 0: s += 15
+    if sig.get("cores", 1) == 0: s += 10
+    return s
+
+
+def check_origin(request: Request) -> None:
+    """허용 도메인이 설정된 실서비스에서, 브라우저가 아닌 직접 API 호출(우회 봇)을 차단한다."""
+    allowed = settings.allowed_origins
+    if not allowed or "*" in allowed:
+        return  # 개발/미설정(ALLOWED_ORIGINS=*) 시 통과
+    origin = request.headers.get("origin") or request.headers.get("referer", "")
+    if not origin or not any(origin.startswith(a) for a in allowed):
+        raise HTTPException(status_code=403, detail="Origin not allowed")
+
+
 def client_ip(request: Request) -> str:
     if settings.trust_proxy and request.headers.get("x-forwarded-for"):
         return request.headers["x-forwarded-for"].split(",", 1)[0].strip()
@@ -162,12 +209,13 @@ def summarize(events: list[BehaviorEvent], selected: set[str], targets: set[str]
     points=[point for segment in segments for point in segment]
     distances: list[float] = []
     speeds: list[float] = []
+    intervals: list[float] = []
     turns = 0.0
     pause_count=0
     for segment in segments:
         for a,b in zip(segment,segment[1:]):
             distance=math.hypot((b.x or 0)-(a.x or 0),(b.y or 0)-(a.y or 0));dt=max(1,b.timestamp_ms-a.timestamp_ms)
-            distances.append(distance);speeds.append(distance/dt);pause_count+=dt>450
+            distances.append(distance);speeds.append(distance/dt);intervals.append(dt);pause_count+=dt>450
         for a,b,c in zip(segment,segment[1:],segment[2:]):
             ab=math.atan2((b.y or 0)-(a.y or 0),(b.x or 0)-(a.x or 0));bc=math.atan2((c.y or 0)-(b.y or 0),(c.x or 0)-(b.x or 0))
             turns+=abs(math.atan2(math.sin(bc-ab),math.cos(bc-ab)))
@@ -187,16 +235,22 @@ def summarize(events: list[BehaviorEvent], selected: set[str], targets: set[str]
     removal_order=[event.object_id for event in events if event.type=="object_removed" and event.object_id]
     reaction=max(0,down-loaded) if down is not None and loaded is not None else None
     speed_cv=(math.sqrt(variance)/average) if average else 0.0
+    dt_mean=sum(intervals)/len(intervals) if intervals else 0.0
+    dt_var=sum((d-dt_mean)**2 for d in intervals)/len(intervals) if intervals else 0.0
+    dt_cv=(math.sqrt(dt_var)/dt_mean) if dt_mean else 1.0
     max_jump=max(distances,default=0.0)
     components={"answer_accuracy":0,"drag_behavior":0,"reaction_exploration":0,
                 "selection_correction":0,"session_behavior":0,"api_pattern":0}
     if not correct: components["answer_accuracy"]=30
     move_count=sum(event.type=="pointer_move" for event in events)
-    if move_count<3: components["drag_behavior"]+=15
-    if move_count>=3 and turns<0.04: components["drag_behavior"]+=7
-    if move_count>=3 and speed_cv<0.035: components["drag_behavior"]+=7
-    if max_jump>.45: components["drag_behavior"]+=8
-    components["drag_behavior"]=min(25,components["drag_behavior"])
+    if move_count<3: components["drag_behavior"]+=20
+    if move_count>=3:
+        if turns<0.04: components["drag_behavior"]+=8            # 곡률 없는 직선 경로
+        if speed_cv<0.04: components["drag_behavior"]+=8         # 등속 이동
+        if dt_cv<0.12: components["drag_behavior"]+=10           # 규칙적 타이밍(봇 고유 신호)
+        if turns<0.06 and speed_cv<0.06 and dt_cv<0.18: components["drag_behavior"]+=15  # 직선+등속+규칙 복합=확정 봇
+    if max_jump>.45: components["drag_behavior"]+=10             # 순간이동
+    components["drag_behavior"]=min(45,components["drag_behavior"])
     if reaction is None: components["reaction_exploration"]=12
     elif reaction<300: components["reaction_exploration"]=15
     elif reaction<600: components["reaction_exploration"]=10
@@ -212,7 +266,12 @@ def summarize(events: list[BehaviorEvent], selected: set[str], targets: set[str]
     if ip_changed: components["api_pattern"]=min(10,components["api_pattern"]+5)
     risk_score=sum(components.values())
     risk_level="normal" if risk_score<30 else "suspicious" if risk_score<60 else "high" if risk_score<80 else "automated"
+    # 행동 지문: 마우스 동역학을 버킷팅해 해시. 같은 풀이툴은 같은 지문을 반복 생성한다.
+    sig_parts=(reaction//250 if reaction is not None else -1, round(turns/0.4), round(speed_cv/0.06),
+               round(dt_cv/0.06), min(move_count,25), pause_count, round(sum(distances)/0.3))
+    behavior_signature=hashlib.sha256(repr(sig_parts).encode()).hexdigest()[:16]
     return {
+        "behavior_signature": behavior_signature,
         "reaction_time_ms": reaction,
         "drag_count": sum(e.type == "drag_start" for e in events),
         "wrong_object_count": len(selected-targets), "average_speed": average,
@@ -489,6 +548,23 @@ app = FastAPI(title="CatChap Object Drag CAPTCHA", version="2.0.0", docs_url="/d
 app.add_middleware(CORSMiddleware, allow_origins=list(settings.allowed_origins), allow_credentials=False,
                    allow_methods=["GET", "POST", "PUT", "OPTIONS"], allow_headers=["*"])
 
+# IP당 분당 요청 상한 — 대량요청 봇(다운로드/크롤러/API 플러드/애플리케이션 홍수) 차단.
+_rate_hits: dict[str, deque] = {}
+
+@app.middleware("http")
+async def rate_limit(request: Request, call_next):
+    if request.url.path.startswith("/health"):
+        return await call_next(request)
+    ip = client_ip(request); now = time.monotonic()
+    dq = _rate_hits.setdefault(ip, deque())
+    while dq and now - dq[0] > 60: dq.popleft()
+    if len(dq) >= settings.rate_limit_per_minute:
+        return JSONResponse({"detail": "Too many requests"}, status_code=429)
+    dq.append(now)
+    if len(_rate_hits) > 20000:  # 메모리 보호: 비활성 IP 정리
+        for k in [k for k, v in list(_rate_hits.items()) if not v or now - v[-1] > 120]: _rate_hits.pop(k, None)
+    return await call_next(request)
+
 
 @app.get("/health/live")
 def live(): return {"status": "ok"}
@@ -497,7 +573,8 @@ def live(): return {"status": "ok"}
 @app.get("/health/ready")
 def ready():
     database_ready = database.ping()
-    approved_questions = bool(database.active_question()) if database_ready else False
+    # ms added a cheap existence check; prefer it over fetching a full question.
+    approved_questions = database.has_active_question() if database_ready else False
     ai_readiness = behavior_ai.readiness()
     behavior_required = settings.behavior_event_transport != "off"
     ai_policy_matches = (
@@ -526,7 +603,7 @@ def public_config(): return {"siteKey": settings.site_key}
 
 @app.post("/api/captcha/challenges", status_code=status.HTTP_201_CREATED)
 def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_key: str | None = Header(None)):
-    require_header(x_captcha_site_key, settings.site_key, "Invalid site key")
+    require_header(x_captcha_site_key, settings.site_key, "Invalid site key"); check_origin(request)
     ip_hash=hash_value(client_ip(request)); pattern=database.request_pattern(payload.session_id,ip_hash)
     if pattern["ip_challenges_1m"]>=settings.max_challenges_per_minute:
         raise HTTPException(429,"Too many CAPTCHA requests")
@@ -552,6 +629,9 @@ def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_
             "behavior_batch_interval_ms":200,"behavior_batch_max_events":32}
     if settings.behavior_event_transport != "off":
         response["behavior_nonce"] = behavior_nonce
+    if settings.pow_enabled:
+        # 연산 퍼즐: 클라이언트가 사람이 문제를 푸는 동안(수 초) 백그라운드로 해결 → 체감 0.
+        response["pow"] = {"seed": challenge_id, "bits": settings.pow_difficulty_bits}
     return response
 
 
@@ -605,15 +685,20 @@ def collect_behavior_batch(
 @app.post("/api/captcha/challenges/{challenge_id}/verify")
 def verify(challenge_id: str, payload: VerifyRequest, request: Request,
            x_captcha_site_key: str | None = Header(None)):
-    require_header(x_captcha_site_key, settings.site_key, "Invalid site key")
+    require_header(x_captcha_site_key, settings.site_key, "Invalid site key"); check_origin(request)
     verify_received_at = utcnow()
     challenge = database.challenge_for_verify(challenge_id)
     if not challenge or challenge["session_id"] != payload.session_id: raise HTTPException(404, "Challenge not found")
     if challenge["status"] == "passed": raise HTTPException(409, "Challenge already used")
     if challenge["expires_at"] <= verify_received_at: raise HTTPException(410, "Challenge expired")
     if challenge["attempt_count"] >= settings.max_attempts: raise HTTPException(429, "No attempts remaining")
+    # 형식 자체가 잘못된 요청은 PoW 검사보다 먼저 거른다. 12개 리스트 중복 검사가
+    # sha256 보다 싸고, 이건 PoW 를 풀었든 안 풀었든 422 인 요청이다.
     if len(payload.selected_object_ids) != len(set(payload.selected_object_ids)):
         raise HTTPException(422, "Duplicate selected object")
+    if settings.pow_enabled and not pow_verify(challenge_id, payload.pow_nonce, settings.pow_difficulty_bits):
+        # 연산 퍼즐 미해결 = 정당한 클라이언트 비용을 치르지 않은 요청. 정답/행동 채점 이전에 저렴하게 차단.
+        return {"success":False,"pow_failed":True}
     submitted=set(payload.selected_object_ids); targets={o["temporary_object_id"] for o in challenge["objects"] if o["role"]=="target"}
     valid={o["temporary_object_id"] for o in challenge["objects"]}; correct=submitted==targets and submitted <= valid
     reason=None if correct else ("unknown_object" if not submitted<=valid else "incorrect_selection")
@@ -735,6 +820,20 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
         if debug_payload is not None:
             response["behavior_debug"] = debug_payload
         return response
+    # ms 의 규칙 기반 게이트. 행동 AI 게이트(resolve_final_verdict)는 위에서 이미 적용됐다.
+    auto=automation_score(payload.client_signals); risk_total=summary["risk_score"]+auto
+    signature=summary["behavior_signature"]; database.record_fingerprint(payload.session_id,signature,risk_total)
+    def _gated(body: dict) -> dict:
+        if debug_payload is not None:
+            body["behavior_debug"] = debug_payload
+        return body
+    if risk_total>=settings.behavior_block_score:
+        return _gated({"success":False,"blocked":True,"risk_level":"automated" if auto>=60 else summary["risk_level"]})
+    if risk_total>=settings.behavior_step_up_score:
+        return _gated({"success":False,"step_up":True,"risk_level":summary["risk_level"]})
+    # 클러스터 게이트: 같은 행동 지문을 여러 세션이 공유 = 공유 풀이툴로 판단해 차단.
+    if database.signature_cluster_size(signature, settings.cluster_window_hours) >= settings.cluster_block_size:
+        return _gated({"success":False,"blocked":True,"risk_level":"automated","reason":"tool_cluster"})
     token=secrets.token_urlsafe(32); database.create_token(challenge_id,hash_value(token),challenge["purpose"],payload.session_id,
                                                          utcnow()+timedelta(seconds=settings.verification_ttl_seconds),challenge.get("lecture_id"))
     response = {"success":True,"captcha_token":token,"expires_in":settings.verification_ttl_seconds}
@@ -799,6 +898,30 @@ def admin_counts(x_captcha_admin_key: str | None = Header(None)):
     """전원 합산 승인/제외 개수(DB 기준). 실시간 폴링용."""
     require_admin(x_captcha_admin_key)
     return database.review_counts()
+
+
+@app.get("/api/admin/clusters")
+def admin_clusters(hours: int = Query(default=24, ge=1, le=720),
+                   min_sessions: int = Query(default=5, ge=2, le=1000),
+                   x_captcha_admin_key: str | None = Header(None)):
+    """공유 풀이툴 의심 클러스터: 같은 행동 지문을 쓰는 세션이 많은 순."""
+    require_admin(x_captcha_admin_key)
+    return {"window_hours": hours, "block_threshold": settings.cluster_block_size,
+            "clusters": database.top_signature_clusters(hours, min_sessions)}
+
+
+@app.get("/api/admin/exposure")
+def admin_exposure(limit: int = Query(default=50, ge=1, le=500), x_captcha_admin_key: str | None = Header(None)):
+    """노출(출제 횟수) 상위 문항 = 캐싱 위험 '탄' 후보. 회전/은퇴 판단용."""
+    require_admin(x_captcha_admin_key)
+    return {"items": database.top_exposed(limit)}
+
+
+@app.post("/api/admin/rest/{question_id}")
+def admin_rest(question_id: str, x_captcha_admin_key: str | None = Header(None)):
+    """과다 노출 문항을 출제 풀에서 내린다(rested)."""
+    require_admin(x_captcha_admin_key)
+    return {"rested": database.rest_question(question_id)}
 
 
 @app.get("/api/admin/assets/{path:path}")
