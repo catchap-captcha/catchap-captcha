@@ -54,6 +54,8 @@ class Settings:
     cluster_block_size: int = int(os.getenv("CLUSTER_BLOCK_SIZE", "7"))
     cluster_window_hours: int = int(os.getenv("CLUSTER_WINDOW_HOURS", "24"))
     rotation_cooldown_seconds: int = int(os.getenv("ROTATION_COOLDOWN_SECONDS", "300"))
+    pow_enabled: bool = os.getenv("POW_ENABLED", "1") == "1"
+    pow_difficulty_bits: int = int(os.getenv("POW_DIFFICULTY_BITS", "17"))
     final_dir: Path = path_setting("FINAL_DIR", "data/final")
     labeling_dir: Path = path_setting("LABELING_DIR", "data/labeling")
     runtime_dir: Path = path_setting("RUNTIME_DIR", "data/runtime")

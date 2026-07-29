@@ -52,6 +52,7 @@ class VerifyRequest(BaseModel):
     duration_ms: int = Field(ge=100, le=180000)
     events: list[BehaviorEvent] = Field(default_factory=list, max_length=600)
     client_signals: dict | None = Field(default=None)
+    pow_nonce: str | None = Field(default=None, max_length=64)
 
 
 class SignupRequest(BaseModel):
@@ -112,6 +113,25 @@ def require_admin(admin_key: str | None) -> str:
     if not reviewer:
         raise HTTPException(status_code=401, detail="Invalid admin key")
     return reviewer
+
+
+def _leading_zero_bits(digest: bytes) -> int:
+    """바이트열의 선행 0비트 수."""
+    n = 0
+    for b in digest:
+        if b == 0:
+            n += 8; continue
+        n += 8 - b.bit_length(); break
+    return n
+
+
+def pow_verify(seed: str, nonce: str | None, bits: int) -> bool:
+    """Proof-of-Work 검증: sha256(seed:nonce)의 선행 0비트가 요구치 이상이어야 통과.
+    봇이 챌린지마다 연산비용을 치르게 해 대량공격의 경제성을 깨뜨린다. 서버검증은 sha256 1회로 저렴."""
+    if not nonce or not isinstance(nonce, str):
+        return False
+    digest = hashlib.sha256(f"{seed}:{nonce}".encode()).digest()
+    return _leading_zero_bits(digest) >= bits
 
 
 def automation_score(sig: dict | None) -> int:
@@ -368,10 +388,14 @@ def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_
                 "preview_url":f"/api/captcha/assets/{challenge_id}/{temporary[obj['id']]}"}
                for obj in question["objects"] if obj["id"] in temporary]
     secrets.SystemRandom().shuffle(objects)
-    return {"challenge_id":challenge_id,"type":"object_drag","instruction":question["instruction_ko"],
+    response = {"challenge_id":challenge_id,"type":"object_drag","instruction":question["instruction_ko"],
             "image_url":f"/api/captcha/assets/{challenge_id}/image","width":question["image_width"],
             "height":question["image_height"],"objects":objects,
             "drop_zone":{"x":0.72,"y":0.68,"width":0.25,"height":0.25},"expires_at":expires.isoformat()+"Z"}
+    if settings.pow_enabled:
+        # 연산 퍼즐: 클라이언트가 사람이 문제를 푸는 동안(수 초) 백그라운드로 해결 → 체감 0.
+        response["pow"] = {"seed": challenge_id, "bits": settings.pow_difficulty_bits}
+    return response
 
 
 @app.get("/api/captcha/assets/{challenge_id}/{asset_id}")
@@ -396,6 +420,9 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
     if challenge["status"] == "passed": raise HTTPException(409, "Challenge already used")
     if challenge["expires_at"] <= utcnow(): raise HTTPException(410, "Challenge expired")
     if challenge["attempt_count"] >= settings.max_attempts: raise HTTPException(429, "No attempts remaining")
+    if settings.pow_enabled and not pow_verify(challenge_id, payload.pow_nonce, settings.pow_difficulty_bits):
+        # 연산 퍼즐 미해결 = 정당한 클라이언트 비용을 치르지 않은 요청. 정답/행동 채점 이전에 저렴하게 차단.
+        return {"success":False,"pow_failed":True}
     submitted=set(payload.selected_object_ids); targets={o["temporary_object_id"] for o in challenge["objects"] if o["role"]=="target"}
     valid={o["temporary_object_id"] for o in challenge["objects"]}; correct=submitted==targets and submitted <= valid
     reason=None if correct else ("unknown_object" if not submitted<=valid else "incorrect_selection")

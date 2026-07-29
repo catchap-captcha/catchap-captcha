@@ -34,6 +34,52 @@ const clientSignals = () => {
   } catch (e) { return {}; }
 };
 
+// ── Proof-of-Work ─────────────────────────────────────────────
+// 서버가 준 seed에 대해 sha256(seed:nonce)의 선행 0비트가 요구치 이상인 nonce를 찾는다.
+// 사람이 문제를 푸는 수 초 동안 워커가 백그라운드로 계산 → 체감 지연 0. 봇은 매 요청마다 이 비용을 치른다.
+function _rotr(x, n) { return (x >>> n) | (x << (32 - n)); }
+function _sha256(bytes) {
+  const K = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+  let h0=0x6a09e667,h1=0xbb67ae85,h2=0x3c6ef372,h3=0xa54ff53a,h4=0x510e527f,h5=0x9b05688c,h6=0x1f83d9ab,h7=0x5be0cd19;
+  const l = bytes.length, bitLen = l * 8, klen = (((l + 1 + 8) + 63) & ~63);
+  const m = new Uint8Array(klen); m.set(bytes); m[l] = 0x80;
+  const dv = new DataView(m.buffer);
+  dv.setUint32(klen - 4, bitLen >>> 0, false); dv.setUint32(klen - 8, Math.floor(bitLen / 0x100000000), false);
+  const w = new Uint32Array(64);
+  for (let off = 0; off < klen; off += 64) {
+    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(off + i * 4, false);
+    for (let i = 16; i < 64; i++) {
+      const s0 = _rotr(w[i-15],7) ^ _rotr(w[i-15],18) ^ (w[i-15] >>> 3);
+      const s1 = _rotr(w[i-2],17) ^ _rotr(w[i-2],19) ^ (w[i-2] >>> 10);
+      w[i] = (w[i-16] + s0 + w[i-7] + s1) | 0;
+    }
+    let a=h0,b=h1,c=h2,d=h3,e=h4,f=h5,g=h6,hh=h7;
+    for (let i = 0; i < 64; i++) {
+      const S1 = _rotr(e,6) ^ _rotr(e,11) ^ _rotr(e,25), ch = (e & f) ^ (~e & g);
+      const t1 = (hh + S1 + ch + K[i] + w[i]) | 0;
+      const S0 = _rotr(a,2) ^ _rotr(a,13) ^ _rotr(a,22), maj = (a & b) ^ (a & c) ^ (b & c);
+      const t2 = (S0 + maj) | 0;
+      hh=g; g=f; f=e; e=(d+t1)|0; d=c; c=b; b=a; a=(t1+t2)|0;
+    }
+    h0=(h0+a)|0; h1=(h1+b)|0; h2=(h2+c)|0; h3=(h3+d)|0; h4=(h4+e)|0; h5=(h5+f)|0; h6=(h6+g)|0; h7=(h7+hh)|0;
+  }
+  return [h0,h1,h2,h3,h4,h5,h6,h7];
+}
+function _lzbits(words) { let n = 0; for (let i = 0; i < words.length; i++) { const x = words[i] >>> 0; if (x === 0) { n += 32; continue; } n += Math.clz32(x); break; } return n; }
+function _powSolve(seed, bits, cap) { const enc = new TextEncoder(); const p = seed + ":"; for (let nonce = 0; nonce < cap; nonce++) { if (_lzbits(_sha256(enc.encode(p + nonce))) >= bits) return String(nonce); } return null; }
+const _powWorkerSrc = `${_rotr.toString()}\n${_sha256.toString()}\n${_lzbits.toString()}\n${_powSolve.toString()}\nself.onmessage=function(e){self.postMessage(_powSolve(e.data.seed,e.data.bits,20000000));};`;
+const solvePow = (pow) => new Promise((resolve) => {
+  if (!pow || !pow.seed) { resolve(null); return; }
+  const { seed, bits } = pow;
+  try {
+    const url = URL.createObjectURL(new Blob([_powWorkerSrc], { type: "application/javascript" }));
+    const worker = new Worker(url); let settled = false;
+    worker.onmessage = (e) => { if (settled) return; settled = true; resolve(e.data || null); worker.terminate(); URL.revokeObjectURL(url); };
+    worker.onerror = () => { if (settled) return; settled = true; URL.revokeObjectURL(url); try { resolve(_powSolve(seed, bits, 20000000)); } catch (_) { resolve(null); } };
+    worker.postMessage({ seed, bits });
+  } catch (err) { try { resolve(_powSolve(seed, bits, 20000000)); } catch (_) { resolve(null); } }
+});
+
 function CaptchaApp() {
   const [challenge, setChallenge] = useState(null);
   const [siteKey, setSiteKey] = useState("");
@@ -49,6 +95,7 @@ function CaptchaApp() {
   const stageRef = useRef(null);
   const dropRef = useRef(null);
   const lastMove = useRef(0);
+  const powRef = useRef(null);
   const embedParams = new URLSearchParams(location.search);
   const embed = embedParams.get("embed") === "1";
   const lectureId = embedParams.get("lecture") || embedParams.get("lecture_id") || null;
@@ -72,6 +119,7 @@ function CaptchaApp() {
       setSiteKey(config.siteKey);
       const row = await api("/api/captcha/challenges", { method: "POST", headers: { "Content-Type": "application/json", "X-Captcha-Site-Key": config.siteKey },
         body: JSON.stringify({ purpose, risk_level: "high", session_id: sessionId(), lecture_id: lectureId }) });
+      powRef.current = solvePow(row.pow);  // 사람이 문제 푸는 동안 백그라운드로 연산 퍼즐 해결
       setChallenge(row); setStartedAt(performance.now()); setMessage(row.instruction);
       deadlineRef.current = Date.now() + 60000; setRemaining(60);
       setEvents([{ type: "challenge_loaded", object_id: null, x: null, y: null, timestamp_ms: Date.now() }]);
@@ -112,17 +160,19 @@ function CaptchaApp() {
     try {
       const submitEvent={type:"submit",object_id:null,x:null,y:null,timestamp_ms:Date.now()};
       const payloadEvents=[...events.slice(-598),submitEvent]; setEvents(payloadEvents);
+      if (powRef.current) setMessage("확인 중입니다…");
+      const powNonce = powRef.current ? await powRef.current : null;  // 워커가 아직이면 잠깐 대기
       const result = await api(`/api/captcha/challenges/${challenge.challenge_id}/verify`, { method: "POST",
         headers: { "Content-Type": "application/json", "X-Captcha-Site-Key": siteKey },
         body: JSON.stringify({ selected_object_ids: selected, session_id: sessionId(),
-          duration_ms: Math.max(100, Math.round(performance.now() - startedAt)), events:payloadEvents, client_signals: clientSignals() }) });
+          duration_ms: Math.max(100, Math.round(performance.now() - startedAt)), events:payloadEvents, client_signals: clientSignals(), pow_nonce: powNonce }) });
       if (result.success) {
         setToken(result.captcha_token);
         setMessage("인증되었습니다.");
         if (embed && window.parent !== window) window.parent.postMessage({ type: "catchap-verified", token: result.captcha_token, lecture_id: lectureId }, "*");
         return;
       }
-      setMessage(result.blocked?"자동화 의심 행동이 감지되었습니다.":result.step_up?"추가 인증이 필요합니다.":"인증에 실패하였습니다.");
+      setMessage(result.blocked?"자동화 의심 행동이 감지되었습니다.":result.step_up?"추가 인증이 필요합니다.":result.pow_failed?"확인에 실패했습니다. 다시 시도합니다.":"인증에 실패하였습니다.");
       window.setTimeout(load, 1200);
     } catch (error) {
       setMessage("인증에 실패하였습니다.");
