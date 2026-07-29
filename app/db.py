@@ -127,7 +127,9 @@ class Database:
                 conn.commit()
                 # 기존 DB용 멱등 마이그레이션(컬럼 이미 있으면 무시)
                 for alter in ("ALTER TABLE captcha_challenges_v2 ADD COLUMN lecture_id VARCHAR(128) NULL",
-                              "ALTER TABLE captcha_tokens ADD COLUMN lecture_id VARCHAR(128) NULL"):
+                              "ALTER TABLE captcha_tokens ADD COLUMN lecture_id VARCHAR(128) NULL",
+                              "ALTER TABLE captcha_questions ADD COLUMN served_count INT NOT NULL DEFAULT 0",
+                              "ALTER TABLE captcha_questions ADD COLUMN last_served_at DATETIME(6) NULL"):
                     try: cur.execute(alter); conn.commit()
                     except Exception: conn.rollback()
             finally: cur.execute("SELECT RELEASE_LOCK('security_captcha_v2_schema')")
@@ -136,13 +138,40 @@ class Database:
         with self.connection(True) as conn, conn.cursor() as cur:
             cur.execute("SELECT 1 ok"); return cur.fetchone()["ok"] == 1
 
-    def active_question(self) -> dict[str, Any] | None:
+    def has_active_question(self) -> bool:
         with self.connection(True) as conn, conn.cursor() as cur:
-            cur.execute("SELECT * FROM captcha_questions WHERE status='active' AND review_status='approved' ORDER BY RAND() LIMIT 1")
+            cur.execute("SELECT 1 FROM captcha_questions WHERE status='active' AND review_status='approved' LIMIT 1")
+            return cur.fetchone() is not None
+
+    def active_question(self) -> dict[str, Any] | None:
+        """회전 출제: 노출 적은 문항 우선 + 쿨다운(방금 나온 문항 제외). 출제 시 노출 카운트 증가."""
+        cooldown = self.settings.rotation_cooldown_seconds
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute("""SELECT * FROM captcha_questions
+              WHERE status='active' AND review_status='approved'
+                AND (last_served_at IS NULL OR last_served_at < UTC_TIMESTAMP(6) - INTERVAL %s SECOND)
+              ORDER BY served_count ASC, RAND() LIMIT 1""", (cooldown,))
             question = cur.fetchone()
-            if not question: return None
+            if not question:  # 전부 쿨다운 중(풀이 작을 때)이면 쿨다운 무시
+                cur.execute("""SELECT * FROM captcha_questions WHERE status='active' AND review_status='approved'
+                  ORDER BY served_count ASC, RAND() LIMIT 1""")
+                question = cur.fetchone()
+            if not question: conn.commit(); return None
+            cur.execute("UPDATE captcha_questions SET served_count=served_count+1, last_served_at=UTC_TIMESTAMP(6) WHERE id=%s", (question["id"],))
             cur.execute("SELECT * FROM captcha_objects WHERE question_id=%s ORDER BY id", (question["id"],))
-            question["objects"] = cur.fetchall(); return question
+            question["objects"] = cur.fetchall(); conn.commit(); return question
+
+    def top_exposed(self, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connection(True) as conn, conn.cursor() as cur:
+            cur.execute("""SELECT id, instruction_ko, served_count, last_served_at FROM captcha_questions
+              WHERE status='active' AND review_status='approved' ORDER BY served_count DESC LIMIT %s""", (limit,))
+            return cur.fetchall()
+
+    def rest_question(self, question_id: str) -> bool:
+        """과다 노출(탄) 문항을 출제 풀에서 내림(rested). 되돌리려면 status를 active로."""
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute("UPDATE captcha_questions SET status='rested' WHERE id=%s AND status='active'", (question_id,))
+            ok = cur.rowcount == 1; conn.commit(); return ok
 
     def create_challenge(self, challenge: dict[str, Any], mappings: list[tuple[int, str]]) -> None:
         with self.connection() as conn, conn.cursor() as cur:

@@ -344,7 +344,7 @@ def live(): return {"status": "ok"}
 
 @app.get("/health/ready")
 def ready():
-    return {"status": "ok" if database.ping() else "error", "approved_questions": bool(database.active_question())}
+    return {"status": "ok" if database.ping() else "error", "approved_questions": database.has_active_question()}
 
 
 @app.get("/api/config")
@@ -488,6 +488,20 @@ def admin_clusters(hours: int = Query(default=24, ge=1, le=720),
     require_admin(x_captcha_admin_key)
     return {"window_hours": hours, "block_threshold": settings.cluster_block_size,
             "clusters": database.top_signature_clusters(hours, min_sessions)}
+
+
+@app.get("/api/admin/exposure")
+def admin_exposure(limit: int = Query(default=50, ge=1, le=500), x_captcha_admin_key: str | None = Header(None)):
+    """노출(출제 횟수) 상위 문항 = 캐싱 위험 '탄' 후보. 회전/은퇴 판단용."""
+    require_admin(x_captcha_admin_key)
+    return {"items": database.top_exposed(limit)}
+
+
+@app.post("/api/admin/rest/{question_id}")
+def admin_rest(question_id: str, x_captcha_admin_key: str | None = Header(None)):
+    """과다 노출 문항을 출제 풀에서 내린다(rested)."""
+    require_admin(x_captcha_admin_key)
+    return {"rested": database.rest_question(question_id)}
 
 
 @app.get("/api/admin/assets/{path:path}")

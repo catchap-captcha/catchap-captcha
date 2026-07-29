@@ -53,6 +53,7 @@ class Settings:
     behavior_block_score: int = int(os.getenv("BEHAVIOR_BLOCK_SCORE", "80"))
     cluster_block_size: int = int(os.getenv("CLUSTER_BLOCK_SIZE", "7"))
     cluster_window_hours: int = int(os.getenv("CLUSTER_WINDOW_HOURS", "24"))
+    rotation_cooldown_seconds: int = int(os.getenv("ROTATION_COOLDOWN_SECONDS", "300"))
     final_dir: Path = path_setting("FINAL_DIR", "data/final")
     labeling_dir: Path = path_setting("LABELING_DIR", "data/labeling")
     runtime_dir: Path = path_setting("RUNTIME_DIR", "data/runtime")
