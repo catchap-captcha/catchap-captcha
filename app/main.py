@@ -23,9 +23,12 @@ from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from .config import ROOT_DIR, settings
 from .db import Database, utcnow
+from .behavior_client import BehaviorAIClient, behavior_attempt_id, build_predict_payload, resolve_final_verdict
 
 
 database = Database(settings)
+# 행동 AI 브릿지. URL/키가 비면 enabled=False → 캡챠 판정에 영향 없음.
+behavior_ai = BehaviorAIClient(settings.behavior_ai_url, settings.behavior_ai_backend_key, settings.behavior_ai_timeout_seconds)
 settings.validate()
 
 
@@ -426,6 +429,20 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
     submitted=set(payload.selected_object_ids); targets={o["temporary_object_id"] for o in challenge["objects"] if o["role"]=="target"}
     valid={o["temporary_object_id"] for o in challenge["objects"]}; correct=submitted==targets and submitted <= valid
     reason=None if correct else ("unknown_object" if not submitted<=valid else "incorrect_selection")
+    # 행동 AI 그림자 채점: 실트래픽을 모델 서비스에 흘려 점수 수집. shadow에서는 캡챠 판정 불변.
+    behavior_prediction=None
+    if behavior_ai.enabled:
+        try:
+            _q=database.get_question(challenge["question_id"])
+            _bid=behavior_attempt_id(challenge_id,int(challenge["attempt_count"])+1)
+            _pred_payload,_pred_reason=build_predict_payload(attempt_id=_bid,challenge_id=challenge_id,
+                session_id=payload.session_id,events=[e.model_dump() for e in payload.events],
+                width=int(_q["image_width"]),height=int(_q["image_height"]),
+                retry_count=int(challenge["attempt_count"]),presented_at=challenge.get("created_at"),submitted_at=utcnow())
+            behavior_prediction=behavior_ai.score(_pred_payload,_bid,_pred_reason)
+            behavior_prediction=behavior_ai.record_shadow_outcome(behavior_prediction,"passed" if correct else "failed")
+        except Exception:
+            behavior_prediction=None
     current_ip_hash=hash_value(client_ip(request)); pattern=database.request_pattern(payload.session_id,current_ip_hash)
     summary=summarize(payload.events,submitted,targets,payload.duration_ms,correct,pattern,
                       current_ip_hash!=challenge["client_ip_hash"])
@@ -444,6 +461,11 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
     # 클러스터 게이트: 같은 행동 지문을 여러 세션이 공유 = 공유 풀이툴로 판단해 차단.
     if database.signature_cluster_size(signature, settings.cluster_window_hours) >= settings.cluster_block_size:
         return {"success":False,"blocked":True,"risk_level":"automated","reason":"tool_cluster"}
+    # 행동 AI 게이트: 정책·모델 둘 다 active일 때만 발동(shadow에서는 통과). 승격 시 실차단.
+    if behavior_prediction is not None:
+        _fv,_action=resolve_final_verdict(captcha_correct=True,prediction=behavior_prediction,local_policy_mode=settings.behavior_policy_mode)
+        if _fv=="failed":
+            return {"success":False,"step_up":True,"risk_level":behavior_prediction.risk_level or "elevated","reason":"behavior_ai"}
     token=secrets.token_urlsafe(32); database.create_token(challenge_id,hash_value(token),challenge["purpose"],payload.session_id,
                                                          utcnow()+timedelta(seconds=settings.verification_ttl_seconds),challenge.get("lecture_id"))
     return {"success":True,"captcha_token":token,"expires_in":settings.verification_ttl_seconds}
