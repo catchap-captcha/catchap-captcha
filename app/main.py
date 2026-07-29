@@ -7,7 +7,9 @@ import math
 import os
 import secrets
 import shutil
+import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
@@ -15,7 +17,7 @@ from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -295,6 +297,23 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="CatChap Object Drag CAPTCHA", version="2.0.0", docs_url="/docs", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=list(settings.allowed_origins), allow_credentials=False,
                    allow_methods=["GET", "POST", "PUT", "OPTIONS"], allow_headers=["*"])
+
+# IP당 분당 요청 상한 — 대량요청 봇(다운로드/크롤러/API 플러드/애플리케이션 홍수) 차단.
+_rate_hits: dict[str, deque] = {}
+
+@app.middleware("http")
+async def rate_limit(request: Request, call_next):
+    if request.url.path.startswith("/health"):
+        return await call_next(request)
+    ip = client_ip(request); now = time.monotonic()
+    dq = _rate_hits.setdefault(ip, deque())
+    while dq and now - dq[0] > 60: dq.popleft()
+    if len(dq) >= settings.rate_limit_per_minute:
+        return JSONResponse({"detail": "Too many requests"}, status_code=429)
+    dq.append(now)
+    if len(_rate_hits) > 20000:  # 메모리 보호: 비활성 IP 정리
+        for k in [k for k, v in list(_rate_hits.items()) if not v or now - v[-1] > 120]: _rate_hits.pop(k, None)
+    return await call_next(request)
 
 
 @app.get("/health/live")

@@ -48,6 +48,7 @@ class Settings:
     verification_ttl_seconds: int = int(os.getenv("VERIFICATION_TTL_SECONDS", "300"))
     max_attempts: int = int(os.getenv("MAX_ATTEMPTS", "3"))
     max_challenges_per_minute: int = int(os.getenv("MAX_CHALLENGES_PER_MINUTE", "30"))
+    rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "300"))
     behavior_step_up_score: int = int(os.getenv("BEHAVIOR_STEP_UP_SCORE", "30"))
     behavior_block_score: int = int(os.getenv("BEHAVIOR_BLOCK_SCORE", "80"))
     cluster_block_size: int = int(os.getenv("CLUSTER_BLOCK_SIZE", "10"))
