@@ -195,7 +195,12 @@ def summarize(events: list[BehaviorEvent], selected: set[str], targets: set[str]
     if ip_changed: components["api_pattern"]=min(10,components["api_pattern"]+5)
     risk_score=sum(components.values())
     risk_level="normal" if risk_score<30 else "suspicious" if risk_score<60 else "high" if risk_score<80 else "automated"
+    # 행동 지문: 마우스 동역학을 버킷팅해 해시. 같은 풀이툴은 같은 지문을 반복 생성한다.
+    sig_parts=(reaction//250 if reaction is not None else -1, round(turns/0.4), round(speed_cv/0.06),
+               round(dt_cv/0.06), min(move_count,25), pause_count, round(sum(distances)/0.3))
+    behavior_signature=hashlib.sha256(repr(sig_parts).encode()).hexdigest()[:16]
     return {
+        "behavior_signature": behavior_signature,
         "reaction_time_ms": reaction,
         "drag_count": sum(e.type == "drag_start" for e in events),
         "wrong_object_count": len(selected-targets), "average_speed": average,
@@ -362,10 +367,14 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
         "answer_correct":correct,"behavior_summary":summary},ensure_ascii=False),encoding="utf-8")
     database.record_attempt(challenge_id,list(submitted),correct,reason,payload.duration_ms,summary,str(event_file.relative_to(ROOT_DIR)))
     if not correct: return {"success":False,"remaining_attempts":max(0,settings.max_attempts-challenge["attempt_count"]-1)}
+    signature=summary["behavior_signature"]; database.record_fingerprint(payload.session_id,signature,summary["risk_score"])
     if summary["risk_score"]>=settings.behavior_block_score:
         return {"success":False,"blocked":True,"risk_level":summary["risk_level"]}
     if summary["risk_score"]>=settings.behavior_step_up_score:
         return {"success":False,"step_up":True,"risk_level":summary["risk_level"]}
+    # 클러스터 게이트: 같은 행동 지문을 여러 세션이 공유 = 공유 풀이툴로 판단해 차단.
+    if database.signature_cluster_size(signature, settings.cluster_window_hours) >= settings.cluster_block_size:
+        return {"success":False,"blocked":True,"risk_level":"automated","reason":"tool_cluster"}
     token=secrets.token_urlsafe(32); database.create_token(challenge_id,hash_value(token),challenge["purpose"],payload.session_id,
                                                          utcnow()+timedelta(seconds=settings.verification_ttl_seconds),challenge.get("lecture_id"))
     return {"success":True,"captcha_token":token,"expires_in":settings.verification_ttl_seconds}
@@ -427,6 +436,16 @@ def admin_counts(x_captcha_admin_key: str | None = Header(None)):
     """전원 합산 승인/제외 개수(DB 기준). 실시간 폴링용."""
     require_admin(x_captcha_admin_key)
     return database.review_counts()
+
+
+@app.get("/api/admin/clusters")
+def admin_clusters(hours: int = Query(default=24, ge=1, le=720),
+                   min_sessions: int = Query(default=5, ge=2, le=1000),
+                   x_captcha_admin_key: str | None = Header(None)):
+    """공유 풀이툴 의심 클러스터: 같은 행동 지문을 쓰는 세션이 많은 순."""
+    require_admin(x_captcha_admin_key)
+    return {"window_hours": hours, "block_threshold": settings.cluster_block_size,
+            "clusters": database.top_signature_clusters(hours, min_sessions)}
 
 
 @app.get("/api/admin/assets/{path:path}")

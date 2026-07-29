@@ -84,6 +84,11 @@ SCHEMA = [
       reviewer VARCHAR(128) NULL, question_id VARCHAR(64) NULL, reviewed_at DATETIME(6) NOT NULL,
       INDEX idx_review_decision_status(review_status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
+    """CREATE TABLE IF NOT EXISTS captcha_behavior_fingerprints (
+      id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, session_id VARCHAR(128) NOT NULL,
+      signature CHAR(16) NOT NULL, risk_score INT NOT NULL, created_at DATETIME(6) NOT NULL,
+      INDEX idx_fp_sig(signature, created_at), INDEX idx_fp_created(created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
 ]
 
 
@@ -224,6 +229,26 @@ class Database:
             cur.execute("UPDATE captcha_tokens SET consumed_at=%s WHERE token_hash=%s AND consumed_at IS NULL", (now, token_hash))
             consumed = cur.rowcount == 1; conn.commit()
             return {"challenge_id": row["challenge_id"], "lecture_id": row.get("lecture_id")} if consumed else None
+
+    # ---- 행동 지문(클러스터) : 공유 풀이툴 탐지 ----
+    def record_fingerprint(self, session_id: str, signature: str, risk_score: int) -> None:
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO captcha_behavior_fingerprints(session_id,signature,risk_score,created_at) VALUES(%s,%s,%s,%s)",
+                        (session_id, signature, int(risk_score), utcnow())); conn.commit()
+
+    def signature_cluster_size(self, signature: str, hours: int = 24) -> int:
+        """이 시그니처를 최근 window 안에 만든 '서로 다른 세션' 수."""
+        with self.connection(True) as conn, conn.cursor() as cur:
+            cur.execute("""SELECT COUNT(DISTINCT session_id) n FROM captcha_behavior_fingerprints
+              WHERE signature=%s AND created_at>UTC_TIMESTAMP(6)-INTERVAL %s HOUR""", (signature, hours))
+            return int(cur.fetchone()["n"])
+
+    def top_signature_clusters(self, hours: int = 24, min_sessions: int = 5, limit: int = 50) -> list[dict[str, Any]]:
+        with self.connection(True) as conn, conn.cursor() as cur:
+            cur.execute("""SELECT signature, COUNT(DISTINCT session_id) sessions, COUNT(*) attempts, ROUND(AVG(risk_score),1) avg_risk
+              FROM captcha_behavior_fingerprints WHERE created_at>UTC_TIMESTAMP(6)-INTERVAL %s HOUR
+              GROUP BY signature HAVING sessions>=%s ORDER BY sessions DESC LIMIT %s""", (hours, min_sessions, limit))
+            return cur.fetchall()
 
     def create_user(self, user_id: str, email: str, password_hash: str) -> None:
         with self.connection() as conn, conn.cursor() as cur:
