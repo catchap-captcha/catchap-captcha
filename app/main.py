@@ -138,12 +138,13 @@ def summarize(events: list[BehaviorEvent], selected: set[str], targets: set[str]
     points=[point for segment in segments for point in segment]
     distances: list[float] = []
     speeds: list[float] = []
+    intervals: list[float] = []
     turns = 0.0
     pause_count=0
     for segment in segments:
         for a,b in zip(segment,segment[1:]):
             distance=math.hypot((b.x or 0)-(a.x or 0),(b.y or 0)-(a.y or 0));dt=max(1,b.timestamp_ms-a.timestamp_ms)
-            distances.append(distance);speeds.append(distance/dt);pause_count+=dt>450
+            distances.append(distance);speeds.append(distance/dt);intervals.append(dt);pause_count+=dt>450
         for a,b,c in zip(segment,segment[1:],segment[2:]):
             ab=math.atan2((b.y or 0)-(a.y or 0),(b.x or 0)-(a.x or 0));bc=math.atan2((c.y or 0)-(b.y or 0),(c.x or 0)-(b.x or 0))
             turns+=abs(math.atan2(math.sin(bc-ab),math.cos(bc-ab)))
@@ -163,16 +164,22 @@ def summarize(events: list[BehaviorEvent], selected: set[str], targets: set[str]
     removal_order=[event.object_id for event in events if event.type=="object_removed" and event.object_id]
     reaction=max(0,down-loaded) if down is not None and loaded is not None else None
     speed_cv=(math.sqrt(variance)/average) if average else 0.0
+    dt_mean=sum(intervals)/len(intervals) if intervals else 0.0
+    dt_var=sum((d-dt_mean)**2 for d in intervals)/len(intervals) if intervals else 0.0
+    dt_cv=(math.sqrt(dt_var)/dt_mean) if dt_mean else 1.0
     max_jump=max(distances,default=0.0)
     components={"answer_accuracy":0,"drag_behavior":0,"reaction_exploration":0,
                 "selection_correction":0,"session_behavior":0,"api_pattern":0}
     if not correct: components["answer_accuracy"]=30
     move_count=sum(event.type=="pointer_move" for event in events)
-    if move_count<3: components["drag_behavior"]+=15
-    if move_count>=3 and turns<0.04: components["drag_behavior"]+=7
-    if move_count>=3 and speed_cv<0.035: components["drag_behavior"]+=7
-    if max_jump>.45: components["drag_behavior"]+=8
-    components["drag_behavior"]=min(25,components["drag_behavior"])
+    if move_count<3: components["drag_behavior"]+=20
+    if move_count>=3:
+        if turns<0.04: components["drag_behavior"]+=8            # 곡률 없는 직선 경로
+        if speed_cv<0.04: components["drag_behavior"]+=8         # 등속 이동
+        if dt_cv<0.12: components["drag_behavior"]+=10           # 규칙적 타이밍(봇 고유 신호)
+        if turns<0.06 and speed_cv<0.06 and dt_cv<0.18: components["drag_behavior"]+=15  # 직선+등속+규칙 복합=확정 봇
+    if max_jump>.45: components["drag_behavior"]+=10             # 순간이동
+    components["drag_behavior"]=min(45,components["drag_behavior"])
     if reaction is None: components["reaction_exploration"]=12
     elif reaction<300: components["reaction_exploration"]=15
     elif reaction<600: components["reaction_exploration"]=10
