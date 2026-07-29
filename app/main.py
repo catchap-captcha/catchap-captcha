@@ -51,6 +51,7 @@ class VerifyRequest(BaseModel):
     session_id: str = Field(min_length=8, max_length=128)
     duration_ms: int = Field(ge=100, le=180000)
     events: list[BehaviorEvent] = Field(default_factory=list, max_length=600)
+    client_signals: dict | None = Field(default=None)
 
 
 class SignupRequest(BaseModel):
@@ -111,6 +112,17 @@ def require_admin(admin_key: str | None) -> str:
     if not reviewer:
         raise HTTPException(status_code=401, detail="Invalid admin key")
     return reviewer
+
+
+def automation_score(sig: dict | None) -> int:
+    """자동화 브라우저 신호 점수. webdriver/헤드리스는 순정 자동화의 강한 흔적."""
+    if not isinstance(sig, dict): return 0
+    s = 0
+    if sig.get("webdriver"): s += 80
+    if sig.get("headlessUA"): s += 80
+    if sig.get("languages", 1) == 0: s += 15
+    if sig.get("cores", 1) == 0: s += 10
+    return s
 
 
 def check_origin(request: Request) -> None:
@@ -396,10 +408,11 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
         "answer_correct":correct,"behavior_summary":summary},ensure_ascii=False),encoding="utf-8")
     database.record_attempt(challenge_id,list(submitted),correct,reason,payload.duration_ms,summary,str(event_file.relative_to(ROOT_DIR)))
     if not correct: return {"success":False,"remaining_attempts":max(0,settings.max_attempts-challenge["attempt_count"]-1)}
-    signature=summary["behavior_signature"]; database.record_fingerprint(payload.session_id,signature,summary["risk_score"])
-    if summary["risk_score"]>=settings.behavior_block_score:
-        return {"success":False,"blocked":True,"risk_level":summary["risk_level"]}
-    if summary["risk_score"]>=settings.behavior_step_up_score:
+    auto=automation_score(payload.client_signals); risk_total=summary["risk_score"]+auto
+    signature=summary["behavior_signature"]; database.record_fingerprint(payload.session_id,signature,risk_total)
+    if risk_total>=settings.behavior_block_score:
+        return {"success":False,"blocked":True,"risk_level":"automated" if auto>=60 else summary["risk_level"]}
+    if risk_total>=settings.behavior_step_up_score:
         return {"success":False,"step_up":True,"risk_level":summary["risk_level"]}
     # 클러스터 게이트: 같은 행동 지문을 여러 세션이 공유 = 공유 풀이툴로 판단해 차단.
     if database.signature_cluster_size(signature, settings.cluster_window_hours) >= settings.cluster_block_size:

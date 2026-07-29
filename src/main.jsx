@@ -21,6 +21,19 @@ const reviewerId = () => {
   return value;
 };
 
+// 자동화 브라우저(헤드리스/Selenium/Playwright 등) 탐지용 신호. 위조 가능하나 순정 자동화를 잡는다.
+const clientSignals = () => {
+  try {
+    const n = navigator || {};
+    return {
+      webdriver: n.webdriver === true,
+      headlessUA: /headless/i.test(n.userAgent || ""),
+      languages: (n.languages || []).length,
+      cores: n.hardwareConcurrency || 0,
+    };
+  } catch (e) { return {}; }
+};
+
 function CaptchaApp() {
   const [challenge, setChallenge] = useState(null);
   const [siteKey, setSiteKey] = useState("");
@@ -102,7 +115,7 @@ function CaptchaApp() {
       const result = await api(`/api/captcha/challenges/${challenge.challenge_id}/verify`, { method: "POST",
         headers: { "Content-Type": "application/json", "X-Captcha-Site-Key": siteKey },
         body: JSON.stringify({ selected_object_ids: selected, session_id: sessionId(),
-          duration_ms: Math.max(100, Math.round(performance.now() - startedAt)), events:payloadEvents }) });
+          duration_ms: Math.max(100, Math.round(performance.now() - startedAt)), events:payloadEvents, client_signals: clientSignals() }) });
       if (result.success) {
         setToken(result.captcha_token);
         setMessage("인증되었습니다.");
