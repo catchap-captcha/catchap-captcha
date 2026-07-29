@@ -51,7 +51,7 @@ class Settings:
     rate_limit_per_minute: int = int(os.getenv("RATE_LIMIT_PER_MINUTE", "300"))
     behavior_step_up_score: int = int(os.getenv("BEHAVIOR_STEP_UP_SCORE", "30"))
     behavior_block_score: int = int(os.getenv("BEHAVIOR_BLOCK_SCORE", "80"))
-    cluster_block_size: int = int(os.getenv("CLUSTER_BLOCK_SIZE", "10"))
+    cluster_block_size: int = int(os.getenv("CLUSTER_BLOCK_SIZE", "7"))
     cluster_window_hours: int = int(os.getenv("CLUSTER_WINDOW_HOURS", "24"))
     final_dir: Path = path_setting("FINAL_DIR", "data/final")
     labeling_dir: Path = path_setting("LABELING_DIR", "data/labeling")

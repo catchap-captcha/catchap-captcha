@@ -113,6 +113,16 @@ def require_admin(admin_key: str | None) -> str:
     return reviewer
 
 
+def check_origin(request: Request) -> None:
+    """허용 도메인이 설정된 실서비스에서, 브라우저가 아닌 직접 API 호출(우회 봇)을 차단한다."""
+    allowed = settings.allowed_origins
+    if not allowed or "*" in allowed:
+        return  # 개발/미설정(ALLOWED_ORIGINS=*) 시 통과
+    origin = request.headers.get("origin") or request.headers.get("referer", "")
+    if not origin or not any(origin.startswith(a) for a in allowed):
+        raise HTTPException(status_code=403, detail="Origin not allowed")
+
+
 def client_ip(request: Request) -> str:
     if settings.trust_proxy and request.headers.get("x-forwarded-for"):
         return request.headers["x-forwarded-for"].split(",", 1)[0].strip()
@@ -331,7 +341,7 @@ def public_config(): return {"siteKey": settings.site_key}
 
 @app.post("/api/captcha/challenges", status_code=status.HTTP_201_CREATED)
 def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_key: str | None = Header(None)):
-    require_header(x_captcha_site_key, settings.site_key, "Invalid site key")
+    require_header(x_captcha_site_key, settings.site_key, "Invalid site key"); check_origin(request)
     ip_hash=hash_value(client_ip(request)); pattern=database.request_pattern(payload.session_id,ip_hash)
     if pattern["ip_challenges_1m"]>=settings.max_challenges_per_minute:
         raise HTTPException(429,"Too many CAPTCHA requests")
@@ -368,7 +378,7 @@ def challenge_asset(challenge_id: str, asset_id: str):
 @app.post("/api/captcha/challenges/{challenge_id}/verify")
 def verify(challenge_id: str, payload: VerifyRequest, request: Request,
            x_captcha_site_key: str | None = Header(None)):
-    require_header(x_captcha_site_key, settings.site_key, "Invalid site key")
+    require_header(x_captcha_site_key, settings.site_key, "Invalid site key"); check_origin(request)
     challenge = database.challenge_for_verify(challenge_id)
     if not challenge or challenge["session_id"] != payload.session_id: raise HTTPException(404, "Challenge not found")
     if challenge["status"] == "passed": raise HTTPException(409, "Challenge already used")
