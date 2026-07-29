@@ -35,7 +35,7 @@ SCHEMA = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
     """CREATE TABLE IF NOT EXISTS captcha_challenges_v2 (
       id CHAR(36) PRIMARY KEY, question_id VARCHAR(64) NOT NULL, session_id VARCHAR(128) NOT NULL,
-      purpose VARCHAR(32) NOT NULL, expires_at DATETIME(6) NOT NULL,
+      purpose VARCHAR(32) NOT NULL, lecture_id VARCHAR(128) NULL, expires_at DATETIME(6) NOT NULL,
       attempt_count TINYINT UNSIGNED NOT NULL DEFAULT 0, status VARCHAR(16) NOT NULL DEFAULT 'issued',
       created_at DATETIME(6) NOT NULL, verified_at DATETIME(6) NULL,
       client_ip_hash CHAR(64) NOT NULL, INDEX idx_challenge_expiry(expires_at),
@@ -99,7 +99,7 @@ SCHEMA = [
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
     """CREATE TABLE IF NOT EXISTS captcha_tokens (
       id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY, challenge_id CHAR(36) NOT NULL,
-      token_hash CHAR(64) NOT NULL UNIQUE, purpose VARCHAR(32) NOT NULL,
+      token_hash CHAR(64) NOT NULL UNIQUE, purpose VARCHAR(32) NOT NULL, lecture_id VARCHAR(128) NULL,
       session_id VARCHAR(128) NOT NULL, expires_at DATETIME(6) NOT NULL, consumed_at DATETIME(6) NULL,
       created_at DATETIME(6) NOT NULL,
       CONSTRAINT fk_token_challenge FOREIGN KEY(challenge_id) REFERENCES captcha_challenges_v2(id) ON DELETE CASCADE
@@ -234,6 +234,11 @@ class Database:
             try:
                 for statement in SCHEMA: cur.execute(statement)
                 conn.commit()
+                # 기존 DB용 멱등 마이그레이션(컬럼 이미 있으면 무시)
+                for alter in ("ALTER TABLE captcha_challenges_v2 ADD COLUMN lecture_id VARCHAR(128) NULL",
+                              "ALTER TABLE captcha_tokens ADD COLUMN lecture_id VARCHAR(128) NULL"):
+                    try: cur.execute(alter); conn.commit()
+                    except Exception: conn.rollback()
             finally: cur.execute("SELECT RELEASE_LOCK('security_captcha_v2_schema')")
 
     def ping(self) -> bool:
@@ -251,9 +256,9 @@ class Database:
     def create_challenge(self, challenge: dict[str, Any], mappings: list[tuple[int, str]], behavior_nonce: str) -> None:
         with self.connection() as conn, conn.cursor() as cur:
             cur.execute("""INSERT INTO captcha_challenges_v2
-              (id,question_id,session_id,purpose,expires_at,status,created_at,client_ip_hash)
-              VALUES(%s,%s,%s,%s,%s,'issued',%s,%s)""",
-              tuple(challenge[k] for k in ("id","question_id","session_id","purpose","expires_at","created_at","client_ip_hash")))
+              (id,question_id,session_id,purpose,lecture_id,expires_at,status,created_at,client_ip_hash)
+              VALUES(%s,%s,%s,%s,%s,%s,'issued',%s,%s)""",
+              tuple(challenge.get(k) for k in ("id","question_id","session_id","purpose","lecture_id","expires_at","created_at","client_ip_hash")))
             cur.executemany("INSERT INTO captcha_challenge_objects(challenge_id,object_id,temporary_object_id) VALUES(%s,%s,%s)",
                             [(challenge["id"], object_id, temporary) for object_id, temporary in mappings])
             cur.execute(
@@ -462,16 +467,34 @@ class Database:
             )
             conn.commit()
 
-    def create_token(self, challenge_id: str, token_hash: str, purpose: str, session_id: str, expires_at: datetime) -> None:
+    def create_token(self, challenge_id: str, token_hash: str, purpose: str, session_id: str,
+                     expires_at: datetime, lecture_id: str | None = None) -> None:
         with self.connection() as conn, conn.cursor() as cur:
-            cur.execute("INSERT INTO captcha_tokens(challenge_id,token_hash,purpose,session_id,expires_at,created_at) VALUES(%s,%s,%s,%s,%s,%s)",
-                        (challenge_id,token_hash,purpose,session_id,expires_at,utcnow())); conn.commit()
+            cur.execute("INSERT INTO captcha_tokens(challenge_id,token_hash,purpose,lecture_id,session_id,expires_at,created_at) VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                        (challenge_id,token_hash,purpose,lecture_id,session_id,expires_at,utcnow())); conn.commit()
 
     def consume_token(self, token_hash: str, purpose: str, session_id: str) -> bool:
         with self.connection() as conn, conn.cursor() as cur:
             cur.execute("""UPDATE captcha_tokens SET consumed_at=%s WHERE token_hash=%s AND purpose=%s AND session_id=%s
               AND consumed_at IS NULL AND expires_at>%s""", (utcnow(),token_hash,purpose,session_id,utcnow()))
             ok=cur.rowcount==1; conn.commit(); return ok
+
+    def verify_token(self, token_hash: str, purpose: str, session_id: str,
+                     lecture_id: str | None = None) -> dict[str, Any] | None:
+        """서버-투-서버 토큰 검증 후 1회 소비. 유효하면 토큰 정보, 아니면 None."""
+        now = utcnow()
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute("""SELECT challenge_id, lecture_id FROM captcha_tokens
+              WHERE token_hash=%s AND purpose=%s AND session_id=%s AND consumed_at IS NULL AND expires_at>%s
+              FOR UPDATE""", (token_hash, purpose, session_id, now))
+            row = cur.fetchone()
+            if not row:
+                conn.commit(); return None
+            if lecture_id is not None and (row.get("lecture_id") or "") != lecture_id:
+                conn.commit(); return None
+            cur.execute("UPDATE captcha_tokens SET consumed_at=%s WHERE token_hash=%s AND consumed_at IS NULL", (now, token_hash))
+            consumed = cur.rowcount == 1; conn.commit()
+            return {"challenge_id": row["challenge_id"], "lecture_id": row.get("lecture_id")} if consumed else None
 
     def create_user(self, user_id: str, email: str, password_hash: str) -> None:
         with self.connection() as conn, conn.cursor() as cur:

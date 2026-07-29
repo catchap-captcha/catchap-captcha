@@ -40,9 +40,11 @@ behavior_ai = BehaviorAIClient(
 
 
 class ChallengeCreate(BaseModel):
-    purpose: Literal["signup", "login", "recovery"] = "signup"
+    purpose: Literal["signup", "login", "recovery", "lecture"] = "signup"
     risk_level: Literal["low", "medium", "high"] = "medium"
     session_id: str = Field(min_length=8, max_length=128)
+    lecture_id: str | None = Field(default=None, max_length=128)
+    playback_position: float | None = Field(default=None, ge=0)
 
 
 class BehaviorEvent(BaseModel):
@@ -80,6 +82,13 @@ class SignupRequest(BaseModel):
     session_id: str = Field(min_length=8, max_length=128)
 
 
+class VerifyTokenRequest(BaseModel):
+    token: str = Field(min_length=32, max_length=256)
+    session_id: str = Field(min_length=8, max_length=128)
+    lecture_id: str | None = Field(default=None, max_length=128)
+    purpose: Literal["signup", "login", "recovery", "lecture"] = "lecture"
+
+
 class ReviewObject(BaseModel):
     object_key: str
     label: str = "giraffe"
@@ -105,6 +114,7 @@ class ReviewRequest(BaseModel):
     review_status: Literal["labeled", "approved", "rejected", "needs_revision"]
     instruction_ko: str = Field(min_length=5, max_length=500)
     difficulty: int = Field(ge=1, le=5)
+    expected_target_count: int | None = Field(default=None, ge=0, le=50)
     objects: list[ReviewObject] = Field(min_length=1, max_length=20)
 
 
@@ -529,7 +539,7 @@ def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_
     mappings = [(obj["id"], f"tmp_{secrets.token_urlsafe(8)}") for obj in question["objects"] if obj["role"] != "invalid"]
     temporary = {object_id: temp for object_id, temp in mappings}
     database.create_challenge({"id":challenge_id,"question_id":question["id"],"session_id":payload.session_id,
-        "purpose":payload.purpose,"expires_at":expires,"created_at":now,"client_ip_hash":ip_hash}, mappings, behavior_nonce)
+        "purpose":payload.purpose,"lecture_id":payload.lecture_id,"expires_at":expires,"created_at":now,"client_ip_hash":ip_hash}, mappings, behavior_nonce)
     objects = [{"object_id":temporary[obj["id"]], "hit_region":[obj["bbox_x"],obj["bbox_y"],obj["bbox_width"],obj["bbox_height"]],
                 "preview_url":f"/api/captcha/assets/{challenge_id}/{temporary[obj['id']]}"}
                for obj in question["objects"] if obj["id"] in temporary]
@@ -726,11 +736,21 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
             response["behavior_debug"] = debug_payload
         return response
     token=secrets.token_urlsafe(32); database.create_token(challenge_id,hash_value(token),challenge["purpose"],payload.session_id,
-                                                         utcnow()+timedelta(seconds=settings.verification_ttl_seconds))
+                                                         utcnow()+timedelta(seconds=settings.verification_ttl_seconds),challenge.get("lecture_id"))
     response = {"success":True,"captcha_token":token,"expires_in":settings.verification_ttl_seconds}
     if debug_payload is not None:
         response["behavior_debug"] = debug_payload
     return response
+
+
+@app.post("/api/verify-token")
+def verify_token(payload: VerifyTokenRequest, x_captcha_site_secret: str | None = Header(None)):
+    """서버-투-서버 토큰 검증. 호스트(인강) 서버가 사이트 시크릿으로 호출한다."""
+    require_header(x_captcha_site_secret, settings.site_secret, "Invalid site secret")
+    result = database.verify_token(hash_value(payload.token), payload.purpose, payload.session_id, payload.lecture_id)
+    if not result:
+        return {"success": False, "error": "invalid_or_used_token"}
+    return {"success": True, "lecture_id": result.get("lecture_id"), "challenge_id": result.get("challenge_id")}
 
 
 @app.post("/api/signup", status_code=201)
@@ -766,9 +786,12 @@ def admin_queue(view: Literal["pending", "approved", "rejected", "all"] = "pendi
 
 @app.post("/api/admin/claim/{queue_id}")
 def claim_item(queue_id: str, x_captcha_admin_key: str | None = Header(None)):
-    """현재 보고 있는 항목을 잠깐 선점(하트비트). 다른 검수자 목록에서 제외된다."""
+    """현재 보고 있는 항목을 잠깐 선점(하트비트). blocked=True면 다른 사람이 처리했거나 보는 중."""
     reviewer=require_admin(x_captcha_admin_key)
-    return {"held": database.touch_claim(queue_id, reviewer)}
+    held=database.touch_claim(queue_id, reviewer)
+    dec=database.get_decision(queue_id)
+    decided=bool(dec and dec.get("review_status") in ("approved","rejected"))
+    return {"held":held,"decided":decided,"blocked":(not held) or decided}
 
 
 @app.get("/api/admin/counts")
@@ -793,8 +816,9 @@ def save_review(queue_id: str, payload: ReviewRequest, x_captcha_admin_key: str 
     prior=database.get_decision(queue_id)
     if prior and prior["review_status"] in {"approved","rejected"} and prior["reviewer"]!=reviewer:
         raise HTTPException(409, f"이미 다른 검수자({prior['reviewer']})가 처리한 문항입니다.")
+    expected=payload.expected_target_count if payload.expected_target_count is not None else int(item["expected_target_count"])
     targets=sum(o.role=="target" for o in payload.objects)
-    if payload.review_status=="approved" and (targets!=int(item["expected_target_count"]) or any(o.role=="ambiguous" for o in payload.objects)):
+    if payload.review_status=="approved" and (targets!=expected or any(o.role=="ambiguous" for o in payload.objects)):
         raise HTTPException(422,"Approved labels must match expected target count and contain no ambiguous objects")
     existing_question_id=item.get("existing_question_id")
     question_id=(existing_question_id if existing_question_id else f"tq_{item['question_id']}") if payload.review_status=="approved" else None

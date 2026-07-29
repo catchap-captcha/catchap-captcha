@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import re
 import shutil
 import zipfile
@@ -156,14 +157,23 @@ def evidence(question: str,label: str,objects: list[dict],attrs: dict[str,set[st
     return next((option for option in options if len(option[0])==answer),None)
 
 
+def _eul(word: str) -> str:
+    """받침 유무에 따라 목적격 조사 을/를 선택."""
+    if not word: return "를"
+    ch = word[-1]
+    if "가" <= ch <= "힣":
+        return "을" if (ord(ch) - 0xAC00) % 28 else "를"
+    return "를"
+
+
 def instruction(label: str,kind: str,detail: str) -> str:
     noun=KOREAN[label]
-    if kind=="count_validated":return f"사진 속 질문 조건에 맞는 {noun}을 모두 정답존으로 옮기세요."
-    if kind=="attribute":return f"{ATTR_KO.get(detail,detail)} {noun}을 모두 정답존으로 옮기세요."
+    if kind in ("manual_fallback","count_validated"):return f"사진 속 질문 조건에 맞는 {noun}{_eul(noun)} 모두 정답존으로 이동하시오."
+    if kind=="attribute":return f"{ATTR_KO.get(detail,detail)} {noun}{_eul(noun)} 모두 정답존으로 이동하시오."
     parts=detail.split(":");action=parts[-2] if len(parts)>=2 else "";obj=parts[-1] if parts else ""
     obj_ko=next((KOREAN[k] for k,aliases in CLASS_ALIASES.items() if obj in aliases),obj)
     phrase=ACTION_KO.get(action,"조건에 맞는")
-    return f"{obj_ko+'을 ' if obj_ko else ''}{phrase} {noun}을 모두 정답존으로 옮기세요."
+    return f"{obj_ko+_eul(obj_ko)+' ' if obj_ko else ''}{phrase} {noun}{_eul(noun)} 모두 정답존으로 이동하시오."
 
 
 def box_pixels(obj: dict,width: int,height: int) -> tuple[int,int,int,int]:
@@ -222,16 +232,32 @@ def segment(model: YOLO,rgb: np.ndarray,objects: list[dict],target_ids: set[str]
 
 
 def main() -> None:
-    parser=argparse.ArgumentParser();parser.add_argument("--limit",type=int,default=1000);parser.add_argument("--model",default="yolo11l-seg.pt");parser.add_argument("--candidate-limit",type=int,default=8000);parser.add_argument("--analyze-only",action="store_true");args=parser.parse_args()
-    test=json.loads((ROOT_DIR/"data/metadata/test.json").read_text());existing_reviews=set()
+    parser=argparse.ArgumentParser()
+    parser.add_argument("--limit",type=int,default=1000)
+    parser.add_argument("--model",default="yolo11l-seg.pt")
+    parser.add_argument("--candidate-limit",type=int,default=8000)
+    parser.add_argument("--batch-name",default="tallyqa_complex_1000")
+    parser.add_argument("--max-answer",type=int,default=6)
+    parser.add_argument("--max-questions-per-image",type=int,default=2)
+    parser.add_argument("--publish-every",type=int,default=50)
+    parser.add_argument("--min-free-gb",type=float,default=5)
+    parser.add_argument("--analyze-only",action="store_true")
+    parser.add_argument("--resume",action="store_true")
+    args=parser.parse_args()
+    metadata=[]
+    classified=ROOT_DIR/"data/metadata/train_classified.json"
+    if classified.exists():
+        metadata.extend({**row,"metadata_split":"train_complex"} for row in json.loads(classified.read_text()) if row.get("issimple") is False)
+    metadata.extend({**row,"metadata_split":"test_complex"} for row in json.loads((ROOT_DIR/"data/metadata/test.json").read_text()) if row.get("issimple") is False)
+    existing_reviews=set()
     reviewed=settings.labeling_dir/"reviewed.jsonl"
     if reviewed.exists():existing_reviews={str(json.loads(line).get("question_id")) for line in reviewed.read_text().splitlines() if line.strip()}
     raw=[]
-    for row in test:
+    for row in metadata:
         try:answer=int(row.get("answer"))
         except (TypeError,ValueError):continue
         q=norm(row.get("question",""));label=question_class(q)
-        if row.get("issimple") is not False or not 1<=answer<=4 or not label or label=="person" and any(f" {x} " in f" {q} " for x in ("men","women","boys","girls","children","kids")):continue
+        if row.get("issimple") is not False or not 1<=answer<=args.max_answer or not label or label=="person" and any(f" {x} " in f" {q} " for x in ("men","women","boys","girls","children","kids")):continue
         image=str(row.get("image",""))
         if not image.startswith(tuple(f"{name}/" for name in ARCHIVES)) or str(row.get("question_id")) in existing_reviews:continue
         raw.append({**row,"answer":answer,"label":label})
@@ -253,10 +279,10 @@ def main() -> None:
             if not image or not label or ann.get("iscrowd"):continue
             ref=wanted[image["file_name"]];x,y,w,h=ann["bbox"]
             coco_data[ref]["objects"].append({"object_id":f"coco_{ann['id']}","names":[label],"x":x,"y":y,"w":w,"h":h})
-    candidates=[];used_images=set();rejects=Counter()
+    candidates=[];image_question_counts=Counter();rejects=Counter()
     for row in raw:
         image_ref=str(row["image"]);image_id=int(Path(image_ref).stem.split("_")[-1])
-        if image_ref in used_images:continue
+        if image_question_counts[image_ref]>=args.max_questions_per_image:continue
         is_vg=str(row["image"]).startswith(("VG_100K/","VG_100K_2/"));meta=image_data.get(image_id,{}) if is_vg else coco_data.get(str(row["image"]),{})
         width=int(meta.get("width",0));height=int(meta.get("height",0))
         if min(width,height)<300:rejects["low_resolution"]+=1;continue
@@ -273,36 +299,69 @@ def main() -> None:
             if duplicate:duplicate["ids"].update(obj["ids"])
             else:dedup.append(obj)
         target_objects=[obj for obj in dedup if obj["label"]==row["label"]]
-        if not 1<=len(target_objects)<=8 or len(target_objects)<row["answer"]:rejects["target_object_count"]+=1;continue
+        if len(target_objects)<row["answer"] or len(target_objects)>14:rejects["target_object_count"]+=1;continue
         attrs=defaultdict(set)
         for attr in attribute_data.get(image_id,[]) if is_vg else []:
             for value in attr.get("attributes",[]):attrs[str(attr.get("object_id"))].add(norm(value))
         found=evidence(row["question"],row["label"],target_objects,attrs,relation_data.get(image_id,[]) if is_vg else [],row["answer"])
         if not found and len(target_objects)==row["answer"]:
             found=({obj["object_key"] for obj in target_objects},"count_validated","")
-        if not found:rejects["no_evidence"]+=1;continue
+        if not found:
+            # 관계 주석이 불완전한 TallyQA 항목도 육안 검수 후보로 보존한다.
+            # 큰 객체를 우선 제안할 뿐 승인 전에는 CAPTCHA에 사용되지 않는다.
+            proposed=sorted(target_objects,key=lambda obj:obj["area_ratio"],reverse=True)[:row["answer"]]
+            found=({obj["object_key"] for obj in proposed},"manual_fallback","")
+            rejects["manual_evidence_required"]+=1
         target_ids,kind,detail=found
         decoys=[obj for obj in dedup if obj["object_key"] not in target_ids]
         selected_targets=[obj for obj in target_objects if obj["object_key"] in target_ids]
         decoys=sorted(decoys,key=lambda obj:obj["area_ratio"],reverse=True)
         selected=selected_targets[:]
         for decoy in decoys:
-            if len(selected)>=min(8,len(selected_targets)+3):break
+            if len(selected)>=min(12,len(selected_targets)+4):break
             if any(overlap(decoy,other)>.42 for other in selected):continue
             selected.append(decoy)
         if len(selected)<=len(selected_targets):rejects["no_decoy"]+=1;continue
         candidates.append({"row":row,"image_id":image_id,"objects":selected,"target_ids":target_ids,"kind":kind,"detail":detail})
-        used_images.add(image_ref)
+        image_question_counts[image_ref]+=1
         if len(candidates)>=args.candidate_limit:break
     print(json.dumps({"complex_numeric_source":len(raw),"annotation_candidates":len(candidates),"pre_rejects":rejects},ensure_ascii=False),flush=True)
     if args.analyze_only:return
-    model=YOLO(args.model);batch=settings.labeling_dir/"tallyqa_complex_1000";images_dir=batch/"images";pieces_dir=batch/"pieces"
-    if batch.exists():shutil.rmtree(batch)
-    images_dir.mkdir(parents=True);pieces_dir.mkdir(parents=True)
-    archives={name:zipfile.ZipFile(ROOT_DIR/"data/raw"/filename) for name,filename in ARCHIVES.items()};queue=[];quality_rejected=Counter()
+    model=YOLO(args.model);batch=settings.labeling_dir/args.batch_name;images_dir=batch/"images";pieces_dir=batch/"pieces"
+    progress_path=batch/"queue.progress.jsonl"
+    if batch.exists() and not args.resume: raise RuntimeError(f"{batch} already exists; use --resume")
+    images_dir.mkdir(parents=True,exist_ok=True);pieces_dir.mkdir(parents=True,exist_ok=True)
+    queue=[json.loads(line) for line in progress_path.read_text().splitlines() if line.strip()] if args.resume and progress_path.exists() else []
+    completed_questions={str(row["question_id"]) for row in queue}
+    quality_rejected=Counter()
+
+    def atomic_rows(path: Path, rows: list[dict]) -> None:
+        temporary=path.with_suffix(path.suffix+".tmp")
+        temporary.write_text("".join(json.dumps(row,ensure_ascii=False)+"\n" for row in rows),encoding="utf-8")
+        os.replace(temporary,path)
+
+    def publish() -> None:
+        atomic_rows(progress_path,queue)
+        ids={str(row["queue_id"]) for row in queue}
+        for path,backup_name in (
+            (settings.labeling_dir/"queue.jsonl",f"queue.before-{args.batch_name}.jsonl"),
+            (settings.labeling_dir/"relation_candidates_all.jsonl",f"relation_candidates_all.before-{args.batch_name}.jsonl"),
+        ):
+            backup=settings.labeling_dir/backup_name
+            if path.exists() and not backup.exists(): shutil.copy2(path,backup)
+            rows=[json.loads(line) for line in path.read_text().splitlines() if line.strip()] if path.exists() else []
+            atomic_rows(path,[row for row in rows if str(row.get("queue_id")) not in ids]+queue)
+        summary={"queued":len(queue),"goal":args.limit,"source_complex_only":True,
+                 "quality_rejected":dict(quality_rejected),"classes":dict(Counter(row["target_label"] for row in queue))}
+        (batch/"summary.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2),encoding="utf-8")
+
+    archives={name:zipfile.ZipFile(ROOT_DIR/"data/raw"/filename) for name,filename in ARCHIVES.items()}
     try:
         for number,candidate in enumerate(candidates,1):
             row=candidate["row"];image_ref=row["image"]
+            if str(row["question_id"]) in completed_questions: continue
+            if shutil.disk_usage(ROOT_DIR).free < args.min_free_gb*1024**3:
+                print(json.dumps({"stopped":"disk_reserve","queued":len(queue)},ensure_ascii=False),flush=True);break
             try:payload=archives[image_ref.split("/",1)[0]].read(image_ref)
             except KeyError:quality_rejected["missing_image"]+=1;continue
             with Image.open(io.BytesIO(payload)) as source:
@@ -311,35 +370,41 @@ def main() -> None:
             if sharpness<85 or contrast<28:quality_rejected["blur_or_low_contrast"]+=1;continue
             segmented=segment(model,rgb,candidate["objects"],candidate["target_ids"])
             if not segmented:quality_rejected["segmentation_failed"]+=1;continue
-            segmented_objects,masks,metrics=segmented;question_id=str(row["question_id"]);image_name=f"{candidate['image_id']}.jpg"
-            Image.fromarray(rgb).save(images_dir/image_name,"JPEG",quality=95,optimize=True)
+            segmented_objects,masks,metrics=segmented;question_id=str(row["question_id"])
+            prefix=image_ref.split("/",1)[0];image_name=f"{prefix}-{candidate['image_id']}-{question_id}.jpg"
+            Image.fromarray(rgb).save(images_dir/image_name,"JPEG",quality=92,optimize=True)
             output_objects=[]
             for obj,mask,metric in zip(segmented_objects,masks,metrics):
-                ys,xs=np.where(mask);x1,x2=max(0,xs.min()-2),min(rgb.shape[1],xs.max()+3);y1,y2=max(0,ys.min()-2),min(rgb.shape[0],ys.max()+3)
+                ys,xs=np.where(mask)
+                if not len(xs) or not len(ys):
+                    output_objects=[]
+                    quality_rejected["empty_mask"]+=1
+                    break
+                x1,x2=max(0,xs.min()-2),min(rgb.shape[1],xs.max()+3);y1,y2=max(0,ys.min()-2),min(rgb.shape[0],ys.max()+3)
                 piece_name=f"{question_id}-{obj['object_key']}.png";rgba=np.dstack((rgb,(mask*255).astype(np.uint8)))[y1:y2,x1:x2]
                 Image.fromarray(rgba,"RGBA").save(pieces_dir/piece_name,"PNG",optimize=True)
                 output_objects.append({"object_key":obj["object_key"],"label":obj["label"],"x":obj["x"],"y":obj["y"],"width":obj["width"],"height":obj["height"],
                     "area_ratio":obj["area_ratio"],"role":"target" if obj["object_key"] in candidate["target_ids"] else "decoy",
-                    "prepared_piece_path":f"tallyqa_complex_1000/pieces/{piece_name}","mask_quality":metric})
-            queue.append({"queue_id":f"tallyqa_complex_{question_id}","question_id":question_id,"image_id":candidate["image_id"],
-                "image_path":f"tallyqa_complex_1000/images/{image_name}","question_en":row["question"],
+                    "prepared_piece_path":f"{args.batch_name}/pieces/{piece_name}","mask_quality":metric})
+            if not output_objects:
+                continue
+            queue.append({"queue_id":f"{args.batch_name}_{question_id}","question_id":question_id,"image_id":candidate["image_id"],
+                "image_path":f"{args.batch_name}/images/{image_name}","question_en":row["question"],
                 "instruction_ko":instruction(row["label"],candidate["kind"],candidate["detail"]),"expected_target_count":row["answer"],
-                "source":"tallyqa_visual_genome","split":"test_complex","target_label":row["label"],"action":candidate["kind"],
+                "source":"tallyqa_complex_manual","split":row.get("metadata_split","complex"),"target_label":row["label"],"action":candidate["kind"],
                 "qualifier":candidate["detail"],"relationship_hints":[],"objects":output_objects,"review_status":"pending",
                 "difficulty":3,"translation_status":"template_requires_review","quality":{"sharpness":sharpness,"contrast":contrast}})
-            if len(queue)%25==0:print(json.dumps({"screened":number,"approved_for_manual_queue":len(queue),"goal":args.limit},ensure_ascii=False),flush=True)
+            completed_questions.add(question_id)
+            if len(queue)%args.publish_every==0:
+                publish()
+                print(json.dumps({"screened":number,"approved_for_manual_queue":len(queue),"goal":args.limit},ensure_ascii=False),flush=True)
             if len(queue)>=args.limit:break
     finally:
         for archive in archives.values():archive.close()
-    if len(queue)<args.limit:raise RuntimeError(f"Only {len(queue)} quality candidates passed; need {args.limit}")
-    queue_path=settings.labeling_dir/"queue.jsonl";backup=settings.labeling_dir/"queue.before-tallyqa-complex-1000.jsonl"
-    if queue_path.exists() and not backup.exists():shutil.copy2(queue_path,backup)
-    queue_path.write_text("".join(json.dumps(row,ensure_ascii=False)+"\n" for row in queue))
-    all_path=settings.labeling_dir/"relation_candidates_all.jsonl";all_rows=[json.loads(x) for x in all_path.read_text().splitlines() if x.strip()]
-    ids={row["queue_id"] for row in queue};all_rows=[row for row in all_rows if row.get("queue_id") not in ids]+queue
-    all_path.write_text("".join(json.dumps(row,ensure_ascii=False)+"\n" for row in all_rows))
-    summary={"queued":len(queue),"source_complex_only":True,"quality_rejected":quality_rejected,"classes":Counter(row["target_label"] for row in queue)}
-    (batch/"summary.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2));print(json.dumps(summary,ensure_ascii=False),flush=True)
+    publish()
+    summary={"queued":len(queue),"goal":args.limit,"complete":len(queue)>=args.limit,"source_complex_only":True,
+             "quality_rejected":dict(quality_rejected),"classes":dict(Counter(row["target_label"] for row in queue))}
+    print(json.dumps(summary,ensure_ascii=False),flush=True)
 
 
 if __name__=="__main__":main()

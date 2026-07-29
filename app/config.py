@@ -45,7 +45,7 @@ class Settings:
     db_unix_socket: str = os.getenv("DB_UNIX_SOCKET", "/var/run/mysqld/mysqld.sock")
     db_host: str = os.getenv("DB_HOST", "127.0.0.1")
     db_port: int = int(os.getenv("DB_PORT", "3306"))
-    challenge_ttl_seconds: int = int(os.getenv("CHALLENGE_TTL_SECONDS", "180"))
+    challenge_ttl_seconds: int = int(os.getenv("CHALLENGE_TTL_SECONDS", "60"))
     verification_ttl_seconds: int = int(os.getenv("VERIFICATION_TTL_SECONDS", "300"))
     max_attempts: int = int(os.getenv("MAX_ATTEMPTS", "3"))
     max_challenges_per_minute: int = int(os.getenv("MAX_CHALLENGES_PER_MINUTE", "30"))

@@ -31,6 +31,8 @@ function CaptchaApp() {
   const [token, setToken] = useState("");
   const [behaviorDebug, setBehaviorDebug] = useState(null);
   const [startedAt, setStartedAt] = useState(0);
+  const [remaining, setRemaining] = useState(60);
+  const deadlineRef = useRef(0);
   const stageRef = useRef(null);
   const dropRef = useRef(null);
   const lastMove = useRef(0);
@@ -102,6 +104,10 @@ function CaptchaApp() {
       void flushBehavior();
     }, interval);
   };
+  const embedParams = new URLSearchParams(location.search);
+  const embed = embedParams.get("embed") === "1";
+  const lectureId = embedParams.get("lecture") || embedParams.get("lecture_id") || null;
+  const purpose = embedParams.get("purpose") || (embed ? "lecture" : "signup");
 
   const record = (type, objectId, event) => {
     if (challengeRef.current?.behavior_event_transport === "off") return;
@@ -133,13 +139,23 @@ function CaptchaApp() {
       const config = siteKey ? { siteKey } : await api("/api/config");
       setSiteKey(config.siteKey); siteKeyRef.current = config.siteKey;
       const row = await api("/api/captcha/challenges", { method: "POST", headers: { "Content-Type": "application/json", "X-Captcha-Site-Key": config.siteKey },
-        body: JSON.stringify({ purpose: "signup", risk_level: "high", session_id: sessionId() }) });
+        body: JSON.stringify({ purpose, risk_level: "high", session_id: sessionId(), lecture_id: lectureId }) });
       setChallenge(row); challengeRef.current = row; behaviorNonceRef.current = row.behavior_nonce;
       setStartedAt(performance.now()); setMessage(row.instruction);
+      deadlineRef.current = Date.now() + 60000; setRemaining(60);
       record("challenge_loaded", null, null);
     } catch (error) { setMessage(error.message); }
   };
   useEffect(() => { load(); }, []);
+  useEffect(() => {
+    if (!challenge || token) return;
+    const id = setInterval(() => {
+      const rem = Math.max(0, Math.ceil((deadlineRef.current - Date.now()) / 1000));
+      setRemaining(rem);
+      if (rem <= 0) { clearInterval(id); setMessage("시간이 초과되었습니다. 새 문제를 불러옵니다."); window.setTimeout(load, 1200); }
+    }, 250);
+    return () => clearInterval(id);
+  }, [challenge, token]);
 
   const moveDrag = (event) => {
     if (!dragging) return;
@@ -180,6 +196,7 @@ function CaptchaApp() {
       if (result.success) {
         setToken(result.captcha_token);
         setMessage("인증되었습니다.");
+        if (embed && window.parent !== window) window.parent.postMessage({ type: "catchap-verified", token: result.captcha_token, lecture_id: lectureId }, "*");
         return;
       }
       setMessage(result.blocked?"자동화 의심 행동이 감지되었습니다.":result.step_up?"추가 인증이 필요합니다.":"인증에 실패하였습니다.");
@@ -202,7 +219,7 @@ function CaptchaApp() {
       </div>
 
       <div className="cc-main">
-        <div className="cc-rowhead"><span className="cc-tag">문제</span><button className="cc-link" onClick={load}>문제 바꾸기</button></div>
+        <div className="cc-rowhead"><span className="cc-tag">문제</span><span className="cc-rowright"><span className={`cc-timer ${remaining<=10?"warn":""}`}>⏱ {Math.floor(remaining/60)}:{String(remaining%60).padStart(2,"0")}</span><button className="cc-link" onClick={load}>문제 바꾸기</button></span></div>
         <div className={`cc-stage ${challenge ? "loaded" : ""}`} ref={stageRef} onPointerMove={moveDrag} onPointerUp={drop} onPointerCancel={cancelDrag}>
           {challenge ? <>
             <img src={challenge.image_url} alt="CAPTCHA 원본 장면" draggable="false" />
@@ -229,7 +246,7 @@ function CaptchaApp() {
       <div className="cc-bottom">
         {token
           ? <div className="cc-done" role="status">확인되었습니다 · 잠시 후 이어집니다</div>
-          : <button className="cc-verify" onClick={verify} disabled={!challenge || !selected.length}>확인</button>}
+          : <button className="cc-verify" onClick={verify} disabled={!challenge || !selected.length || remaining<=0}>확인</button>}
         <div className="cc-guard"><span>이 확인은 <strong>CatChap Guard</strong>로 보호됩니다</span><a className="cc-admin-link" href="/admin">라벨링 콘솔</a></div>
         {behaviorDebug && <section className="cc-debug" aria-label="로컬 행동 모델 점수">
           <strong>로컬 행동 점수</strong>
@@ -253,14 +270,15 @@ function AdminApp() {
   const [draft,setDraft]=useState(null); const [message,setMessage]=useState("관리자 키를 입력하세요.");
   const [selectedObjectKey,setSelectedObjectKey]=useState(null);
   const [reviewerName,setReviewerName]=useState(""); const [counts,setCounts]=useState({approved:0,rejected:0});
-  const canvasRef=useRef(null); const editRef=useRef(null);
+  const canvasRef=useRef(null); const editRef=useRef(null); const advanceRef=useRef(null);
   const item=items[index];
   const load=async(nextView)=>{ const requested=typeof nextView==="string"?nextView:view; try { const data=await api(`/api/admin/queue?view=${requested}`,{headers:{"X-Captcha-Admin-Key":key}}); setView(requested); setItems(data.items); setIndex(0); setDraft(data.items[0]||null); if(data.reviewer) setReviewerName(data.reviewer); if(data.counts) setCounts(data.counts); const label=requested==="approved"?"승인 완료":requested==="rejected"?"제외":"승인 대기"; setMessage(`${data.items.length}개 ${label} 문항을 불러왔습니다.`); } catch(error){setMessage(error.message);} };
   const advance=()=>{ const remaining=items.filter((row)=>row.queue_id!==draft.queue_id); if(!remaining.length){load(view);return;} setItems(remaining); setIndex(Math.min(index,remaining.length-1)); };
+  advanceRef.current=advance;
   const refreshCounts=async()=>{ try{ const c=await api("/api/admin/counts",{headers:{"X-Captcha-Admin-Key":key}}); setCounts(c);}catch(e){} };
   useEffect(()=>{ if(item) setDraft(structuredClone(item)); },[index,items]);
   const currentQid=item?.queue_id;
-  useEffect(()=>{ if(!currentQid||!key||view!=="pending") return; const ping=()=>fetch(`/api/admin/claim/${currentQid}`,{method:"POST",headers:{"X-Captcha-Admin-Key":key}}).catch(()=>{}); ping(); const t=setInterval(ping,60000); return ()=>clearInterval(t); },[currentQid,key,view]);
+  useEffect(()=>{ if(!currentQid||!key||view!=="pending") return; const ping=async()=>{ try{ const r=await fetch(`/api/admin/claim/${currentQid}`,{method:"POST",headers:{"X-Captcha-Admin-Key":key}}); const d=await r.json(); if(d&&d.blocked&&advanceRef.current){ setMessage(d.decided?"이미 처리된 문항이라 건너뜁니다.":"다른 검수자가 보는 중이라 건너뜁니다."); advanceRef.current(); } }catch(e){} }; ping(); const t=setInterval(ping,60000); return ()=>clearInterval(t); },[currentQid,key,view]);
   useEffect(()=>{ if(!key||!reviewerName) return; const t=setInterval(refreshCounts,5000); return ()=>clearInterval(t); },[key,reviewerName]);
   const updateObject=(objectKey,patch)=>setDraft((current)=>({...current,objects:current.objects.map((obj)=>obj.object_key===objectKey?{...obj,...patch}:obj)}));
   const clamp=(value,min,max)=>Math.min(max,Math.max(min,value));
@@ -274,14 +292,14 @@ function AdminApp() {
     updateObject(edit.objectKey,{x:+x.toFixed(6),y:+y.toFixed(6),width:+width.toFixed(6),height:+height.toFixed(6)});
   };
   const endBoxEdit=()=>{editRef.current=null;};
-  const save=async(status)=>{ try { await api(`/api/admin/reviews/${draft.queue_id}`,{method:"PUT",headers:{"Content-Type":"application/json","X-Captcha-Admin-Key":key},body:JSON.stringify({queue_id:draft.queue_id,reviewer:"web",review_status:status,instruction_ko:draft.instruction_ko,difficulty:draft.difficulty||2,objects:draft.objects})}); setMessage(`${status} 상태로 저장했습니다.`); refreshCounts(); if(status==="approved"||status==="rejected"){advance();}else if(index<items.length-1)setIndex(index+1); } catch(error){ setMessage(error.message); if(/이미|처리 중/.test(error.message)) advance(); } };
+  const save=async(status)=>{ try { await api(`/api/admin/reviews/${draft.queue_id}`,{method:"PUT",headers:{"Content-Type":"application/json","X-Captcha-Admin-Key":key},body:JSON.stringify({queue_id:draft.queue_id,reviewer:"web",review_status:status,instruction_ko:draft.instruction_ko,difficulty:draft.difficulty||2,expected_target_count:Number(draft.expected_target_count),objects:draft.objects})}); setMessage(`${status} 상태로 저장했습니다.`); refreshCounts(); if(status==="approved"||status==="rejected"){advance();}else if(index<items.length-1)setIndex(index+1); } catch(error){ setMessage(error.message); if(/이미|처리 중/.test(error.message)) advance(); } };
   const addBox=()=>{const object_key=`manual_${crypto.randomUUID().slice(0,8)}`;setDraft({...draft,objects:[...draft.objects,{object_key,label:"새 객체",x:.35,y:.25,width:.2,height:.35,role:"ambiguous"}]});setSelectedObjectKey(object_key);};
   if(!items.length)return <main className="admin-login"><div className="brand-mark">C</div><h1>라벨링 콘솔</h1><p>{message}</p><input type="password" value={key} onChange={(e)=>setKey(e.target.value)} placeholder="관리자 키"/><button className="primary" onClick={load}>후보 불러오기</button><a href="/">사용자 화면으로</a></main>;
   const targetCount=draft.objects.filter((obj)=>obj.role==="target").length;
   return <main className="admin-shell"><header className="admin-head"><div><p className="kicker">LABELING CONSOLE</p><h1>객체 관계 검수</h1></div><div><button className="outline" onClick={()=>load("pending")}>승인 대기</button><button className="outline" onClick={()=>load("approved")}>승인 완료</button><button className="outline" onClick={()=>load("rejected")}>제외</button><span>{reviewerName?`${reviewerName} · `:""}승인 {counts.approved} · 제외 {counts.rejected} · {index+1}/{items.length}</span><a href="/">사용자 화면</a></div></header>
     <section className="review-grid"><div className="review-canvas" ref={canvasRef} onPointerMove={moveBox} onPointerUp={endBoxEdit} onPointerCancel={endBoxEdit}><AdminImage path={draft.image_path} adminKey={key}/>
       {draft.objects.map((obj)=><div key={obj.object_key} className={`bbox ${obj.role} ${selectedObjectKey===obj.object_key?"selected":""}`} style={{left:`${obj.x*100}%`,top:`${obj.y*100}%`,width:`${obj.width*100}%`,height:`${obj.height*100}%`}} onPointerDown={(e)=>beginBoxEdit(e,obj,"move")}><span>{obj.label} · {obj.role}</span>{["nw","ne","sw","se"].map((corner)=><i key={corner} className={`resize-handle ${corner}`} onPointerDown={(e)=>beginBoxEdit(e,obj,corner)} />)}</div>)}</div>
-      <aside><p className="question-en">{draft.question_en}</p><textarea value={draft.instruction_ko} onChange={(e)=>setDraft({...draft,instruction_ko:e.target.value})}/><div className="target-count"><span>target 수</span><strong className={targetCount===draft.expected_target_count?"match":""}>{targetCount} / {draft.expected_target_count}</strong></div><p className="hint">관계 힌트: {draft.relationship_hints?.map((r)=>r.predicate).join(", ")||"없음 — 육안 검수 필요"}</p><p className="edit-help">박스를 드래그해 이동하고, 네 모서리를 잡아 크기를 조절하세요.</p><button className="outline" onClick={addBox}>+ 새 bbox</button></aside></section>
+      <aside><p className="question-en">{draft.question_en}</p><textarea value={draft.instruction_ko} onChange={(e)=>setDraft({...draft,instruction_ko:e.target.value})}/><div className="target-count"><span>target 수</span><strong className={targetCount===Number(draft.expected_target_count)?"match":""}>{targetCount} / <input type="number" min="0" max="50" className="tc-input" value={draft.expected_target_count} onChange={(e)=>setDraft({...draft,expected_target_count:Number(e.target.value)})}/></strong></div><p className="hint">관계 힌트: {draft.relationship_hints?.map((r)=>r.predicate).join(", ")||"없음 — 육안 검수 필요"}</p><p className="edit-help">박스를 드래그해 이동하고, 네 모서리를 잡아 크기를 조절하세요.</p><button className="outline" onClick={addBox}>+ 새 bbox</button></aside></section>
     <section className="object-table"><div className="table-head"><span>객체 라벨</span><span>역할</span><span>정규화 bbox (x, y, w, h)</span><span></span></div>{draft.objects.map((obj)=><div className={`object-row ${selectedObjectKey===obj.object_key?"selected":""}`} key={obj.object_key} onClick={()=>setSelectedObjectKey(obj.object_key)}><label className="label-editor"><input value={obj.label} onChange={(e)=>updateObject(obj.object_key,{label:e.target.value})} aria-label="객체 라벨"/><small>{obj.object_key}</small></label><select value={obj.role} onChange={(e)=>updateObject(obj.object_key,{role:e.target.value})}>{["target","decoy","ambiguous","invalid"].map((role)=><option key={role}>{role}</option>)}</select><div className="coords">{["x","y","width","height"].map((name)=><input key={name} type="number" min="0" max="1" step="0.001" value={obj[name]} onChange={(e)=>updateObject(obj.object_key,{[name]:Number(e.target.value)})}/>)}</div><button className="delete" onClick={()=>setDraft({...draft,objects:draft.objects.filter((row)=>row.object_key!==obj.object_key)})}>삭제</button></div>)}</section>
     <footer className="review-actions"><p>{message}</p><div><button className="outline" onClick={()=>setIndex(Math.max(0,index-1))}>이전</button><button className="danger" onClick={()=>save("rejected")}>제외</button><button className="outline" onClick={()=>save("labeled")}>임시 저장</button><button className="primary" onClick={()=>save("approved")}>승인 및 다음</button></div></footer></main>;
 }
