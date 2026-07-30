@@ -576,6 +576,27 @@ def admin_clusters(hours: int = Query(default=24, ge=1, le=720),
             "clusters": database.top_signature_clusters(hours, min_sessions)}
 
 
+@app.get("/api/admin/behavior-shadow")
+def admin_behavior_shadow(days: int = Query(default=7, ge=1, le=90), x_captcha_admin_key: str | None = Header(None)):
+    """behavior-AI active 승격 준비도. shadow 예측을 집계해 go/no-go를 판정한다."""
+    require_admin(x_captcha_admin_key)
+    s = database.behavior_shadow_summary(days)
+    min_passed = settings.behavior_promote_min_passed; max_fp = settings.behavior_promote_max_fp_rate
+    fp = s.get("fp_proxy_rate")
+    ready = bool(s.get("table") and s.get("passed", 0) >= min_passed and fp is not None and fp <= max_fp)
+    if not s.get("table"):
+        verdict = "no_data"; reason = "behavior_shadow_predictions 테이블 없음(모델 미연동)"
+    elif s.get("passed", 0) < min_passed:
+        verdict = "insufficient_data"; reason = f"사람 프록시 표본 {s.get('passed',0)} < 최소 {min_passed}"
+    elif fp is not None and fp > max_fp:
+        verdict = "fp_too_high"; reason = f"오탐 프록시 {fp:.2%} > 허용 {max_fp:.2%}"
+    else:
+        verdict = "ready"; reason = "기준 충족 — 카나리 승격 검토 가능"
+    return {"summary": s, "criteria": {"min_passed": min_passed, "max_fp_rate": max_fp},
+            "ready": ready, "verdict": verdict, "reason": reason,
+            "current_policy_mode": settings.behavior_policy_mode}
+
+
 @app.get("/api/admin/exposure")
 def admin_exposure(limit: int = Query(default=50, ge=1, le=500), x_captcha_admin_key: str | None = Header(None)):
     """노출(출제 횟수) 상위 문항 = 캐싱 위험 '탄' 후보. 회전/은퇴 판단용."""

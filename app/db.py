@@ -146,6 +146,31 @@ class Database:
         with self.connection(True) as conn, conn.cursor() as cur:
             cur.execute("SELECT 1 ok"); return cur.fetchone()["ok"] == 1
 
+    def behavior_shadow_summary(self, days: int) -> dict[str, Any]:
+        """behavior-AI 승격 준비도. 사람 프록시(정답 통과)에 대한 오탐 프록시(step_up율)를 계산."""
+        empty = {"table": False, "total": 0}
+        with self.connection(True) as conn, conn.cursor() as cur:
+            cur.execute("""SELECT COUNT(*) n FROM information_schema.tables
+                           WHERE table_schema=%s AND table_name='behavior_shadow_predictions'""", (self.settings.db_name,))
+            if cur.fetchone()["n"] == 0:
+                return empty
+            cur.execute("""SELECT
+                  COUNT(*) total,
+                  SUM(recommended_action IN ('step_up','step_up_and_rate_limit')) would_block,
+                  SUM(main_captcha_verdict='passed') passed,
+                  SUM(main_captcha_verdict='passed' AND recommended_action IN ('step_up','step_up_and_rate_limit')) passed_would_block,
+                  SUM(status='scored') scored
+                FROM behavior_shadow_predictions
+                WHERE created_at > UTC_TIMESTAMP() - INTERVAL %s DAY""", (days,))
+            r = cur.fetchone() or {}
+            cur.execute("""SELECT COALESCE(recommended_action,'(none)') a, COUNT(*) n
+                FROM behavior_shadow_predictions WHERE created_at > UTC_TIMESTAMP() - INTERVAL %s DAY GROUP BY a""", (days,))
+            actions = {row["a"]: row["n"] for row in cur.fetchall()}
+        passed = int(r.get("passed") or 0); pwb = int(r.get("passed_would_block") or 0)
+        return {"table": True, "days": days, "total": int(r.get("total") or 0), "scored": int(r.get("scored") or 0),
+                "would_block": int(r.get("would_block") or 0), "passed": passed, "passed_would_block": pwb,
+                "fp_proxy_rate": round(pwb / passed, 4) if passed else None, "action_dist": actions}
+
     def has_active_question(self) -> bool:
         with self.connection(True) as conn, conn.cursor() as cur:
             cur.execute("SELECT 1 FROM captcha_questions WHERE status='active' AND review_status='approved' LIMIT 1")
