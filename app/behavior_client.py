@@ -167,6 +167,7 @@ def build_predict_payload(
     retry_count: int,
     presented_at: datetime | None = None,
     submitted_at: datetime | None = None,
+    anonymous_participant_id: str | None = None,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Return a behavior request without answer semantics or object IDs.
 
@@ -184,6 +185,13 @@ def build_predict_payload(
             "attempt_id": attempt_id,
             "challenge_id": challenge_id,
             "session_id": _bounded_session_id(session_id),
+            # 참여자 구분. 오탐률은 참여자 단위로 봐야 의미가 있다 — 시도 단위
+            # 총계는 헤비 유저가 평균을 가린다(재검증에서 54명 중 4명이 개별
+            # 3% 초과였는데 총계는 기준을 통과했다). 이 값이 없으면 수집이
+            # 끝난 뒤에는 되붙일 수 없으므로 지금부터 실어 보낸다.
+            "anonymous_participant_id": _bounded_session_id(
+                anonymous_participant_id or session_id
+            ),
             "captcha": {"width": width, "height": height},
             "timing": {
                 "presented_at": presented_at.isoformat() if presented_at else None,

@@ -335,3 +335,31 @@ def test_canonical_events_does_not_touch_anything_but_coordinates():
     assert out[0]["y"] is None
     assert out[0]["x"] == pytest.approx(0.123457, abs=1e-9)
     assert events[0]["x"] == 0.123456789, "입력을 제자리에서 바꾸면 안 된다"
+
+
+def test_predict_payload_always_carries_a_participant_id():
+    """참여자 구분이 payload 에 실려야 한다.
+
+    빠져도 아무 데서도 안 터진다 — DB 컬럼이 NULL 을 받고 수집은 계속 돈다.
+    그런데 오탐률을 참여자 단위로 못 재게 되고, 수집이 끝난 뒤에는 되붙일 수
+    없다. 그래서 조용히 빠지는 것을 여기서 막는다.
+    """
+    from app.behavior_client import build_predict_payload
+
+    events = [
+        {"type": "pointer_down", "object_id": "tmp_a", "x": 0.2, "y": 0.3, "timestamp_ms": 100},
+        {"type": "pointer_move", "object_id": "tmp_a", "x": 0.4, "y": 0.5, "timestamp_ms": 240},
+        {"type": "drop", "object_id": "tmp_a", "x": 0.8, "y": 0.8, "timestamp_ms": 380},
+    ]
+    common = dict(attempt_id="a1", challenge_id="c1", events=events,
+                  width=500, height=500, retry_count=0)
+
+    payload, reason = build_predict_payload(session_id="session-abcdef12", **common)
+    assert reason is None
+    assert payload["anonymous_participant_id"] == "session-abcdef12", "세션으로 대체되지 않았다"
+
+    # 명시적으로 주면 그쪽이 이긴다 — 수집 세션에서 참여자 코드를 부여할 때 쓴다.
+    payload, _ = build_predict_payload(
+        session_id="session-abcdef12", anonymous_participant_id="P07", **common
+    )
+    assert payload["anonymous_participant_id"] == "P07"

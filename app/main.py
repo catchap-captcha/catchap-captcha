@@ -766,6 +766,7 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
                 retry_count=int(challenge["attempt_count"]),
                 presented_at=challenge.get("created_at"),
                 submitted_at=verify_received_at,
+                anonymous_participant_id=payload.session_id,
             )
             telemetry_reason = predict_reason
         prediction = behavior_ai.score(predict_payload, behavior_id, predict_reason)
