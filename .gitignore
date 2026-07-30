@@ -11,6 +11,12 @@ node_modules/
 # Secrets / local env
 .env
 .env.local
+# 로테이션/시크릿 생성물 (실제 비밀 — 절대 커밋 금지)
+.env.pre-rotate
+.env.pre-*
+NEW_ADMIN_KEYS.txt
+CATCHAP_AI_DB_CREDS.txt
+*creds*.txt
 
 # Runtime data
 data/
