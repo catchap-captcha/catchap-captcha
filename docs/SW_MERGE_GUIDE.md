@@ -40,13 +40,14 @@
 
 ## 3. 이미 적용된 공유 DB 마이그레이션 (재적용 불요)
 `captcha_ms`(210)에 이미 적용됨. DEFAULT 값이 있어 기존/타 빌드 무영향. sw-captcha가 `SELECT *`로 읽으면 자동 반영, 명시 컬럼 SELECT면 추가만 하면 됨.
-- `captcha_challenges_v2`: `lecture_id`, `pow_bits`
+- `captcha_challenges_v2`: `lecture_id`, `pow_bits`, `honeypot_ids`
 - `captcha_tokens`: `lecture_id`
 - `captcha_questions`: `served_count`, `last_served_at`
 
 ---
 
 ## 4. 선택 — 전체 방어 스택 (sw-captcha에 없을 때만)
+- `d0fbe60` **허니팟 객체 + 드롭존 랜덤화** (드래그 방식 유지, 봇차단↑) — 서버 위주, 프론트는 드롭존 위치 반영 1줄
 - `09c61fb` 행동점수 강화 · `21bea0e` 클러스터 탐지 · `fa1d1d3` 레이트리밋 · `c7d9274` Origin 검증 · `eab405e` 자동화 탐지 · `5453932` 문항 회전 · `32d086c` 1분 제한시간
 - **중복 병합 금지** — 먼저 diff로 sw-captcha가 이미 가진 것 확인.
 
