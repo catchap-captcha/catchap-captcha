@@ -383,10 +383,16 @@ def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_
     question = database.active_question()
     if not question: raise HTTPException(503, "No approved CAPTCHA questions")
     challenge_id = str(uuid.uuid4()); now = utcnow(); expires = now + timedelta(seconds=settings.challenge_ttl_seconds)
+    # 적응형 PoW: 최근 실패/과다요청 세션엔 난이도 상향 → 봇 재시도 비용 계단식 상승.
+    pow_bits = settings.pow_difficulty_bits
+    if settings.pow_enabled and (pattern["session_failures_10m"] >= settings.pow_stepup_failures
+                                 or pattern["session_challenges_10m"] >= settings.pow_stepup_challenges):
+        pow_bits += settings.pow_stepup_bits
     mappings = [(obj["id"], f"tmp_{secrets.token_urlsafe(8)}") for obj in question["objects"] if obj["role"] != "invalid"]
     temporary = {object_id: temp for object_id, temp in mappings}
     database.create_challenge({"id":challenge_id,"question_id":question["id"],"session_id":payload.session_id,
-        "purpose":payload.purpose,"lecture_id":payload.lecture_id,"expires_at":expires,"created_at":now,"client_ip_hash":ip_hash}, mappings)
+        "purpose":payload.purpose,"lecture_id":payload.lecture_id,"expires_at":expires,"created_at":now,
+        "client_ip_hash":ip_hash,"pow_bits":pow_bits}, mappings)
     objects = [{"object_id":temporary[obj["id"]], "hit_region":[obj["bbox_x"],obj["bbox_y"],obj["bbox_width"],obj["bbox_height"]],
                 "preview_url":f"/api/captcha/assets/{challenge_id}/{temporary[obj['id']]}"}
                for obj in question["objects"] if obj["id"] in temporary]
@@ -397,7 +403,7 @@ def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_
             "drop_zone":{"x":0.72,"y":0.68,"width":0.25,"height":0.25},"expires_at":expires.isoformat()+"Z"}
     if settings.pow_enabled:
         # 연산 퍼즐: 클라이언트가 사람이 문제를 푸는 동안(수 초) 백그라운드로 해결 → 체감 0.
-        response["pow"] = {"seed": challenge_id, "bits": settings.pow_difficulty_bits}
+        response["pow"] = {"seed": challenge_id, "bits": pow_bits}
     return response
 
 
@@ -423,7 +429,8 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
     if challenge["status"] == "passed": raise HTTPException(409, "Challenge already used")
     if challenge["expires_at"] <= utcnow(): raise HTTPException(410, "Challenge expired")
     if challenge["attempt_count"] >= settings.max_attempts: raise HTTPException(429, "No attempts remaining")
-    if settings.pow_enabled and not pow_verify(challenge_id, payload.pow_nonce, settings.pow_difficulty_bits):
+    _pow_bits = int(challenge.get("pow_bits") or settings.pow_difficulty_bits)  # 발급 시 정한 난이도(적응형)
+    if settings.pow_enabled and not pow_verify(challenge_id, payload.pow_nonce, _pow_bits):
         # 연산 퍼즐 미해결 = 정당한 클라이언트 비용을 치르지 않은 요청. 정답/행동 채점 이전에 저렴하게 차단.
         return {"success":False,"pow_failed":True}
     submitted=set(payload.selected_object_ids); targets={o["temporary_object_id"] for o in challenge["objects"] if o["role"]=="target"}

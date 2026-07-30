@@ -57,6 +57,10 @@ class Settings:
     rotation_cooldown_seconds: int = int(os.getenv("ROTATION_COOLDOWN_SECONDS", "300"))
     pow_enabled: bool = os.getenv("POW_ENABLED", "1") == "1"
     pow_difficulty_bits: int = int(os.getenv("POW_DIFFICULTY_BITS", "17"))
+    # 적응형 PoW: 최근 실패/과다요청 세션엔 난이도를 올려 봇 재시도 비용을 계단식 상승.
+    pow_stepup_bits: int = int(os.getenv("POW_STEPUP_BITS", "4"))
+    pow_stepup_failures: int = int(os.getenv("POW_STEPUP_FAILURES", "1"))
+    pow_stepup_challenges: int = int(os.getenv("POW_STEPUP_CHALLENGES", "5"))
     # 행동 AI(별도 내부 모델 서비스). URL/키가 비면 비활성 → 캡챠 판정에 영향 없음(A와 동일 안전장치).
     behavior_ai_url: str = os.getenv("BEHAVIOR_AI_URL", "")
     behavior_ai_backend_key: str = os.getenv("BEHAVIOR_AI_BACKEND_KEY", "")
