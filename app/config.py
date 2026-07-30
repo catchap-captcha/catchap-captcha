@@ -56,7 +56,7 @@ class Settings:
     behavior_block_score: int = int(os.getenv("BEHAVIOR_BLOCK_SCORE", "80"))
     cluster_block_size: int = int(os.getenv("CLUSTER_BLOCK_SIZE", "7"))
     cluster_window_hours: int = int(os.getenv("CLUSTER_WINDOW_HOURS", "24"))
-    rotation_cooldown_seconds: int = int(os.getenv("ROTATION_COOLDOWN_SECONDS", "300"))
+    rotation_cooldown_seconds: int = int(os.getenv("ROTATION_COOLDOWN_SECONDS", "1800"))
     pow_enabled: bool = os.getenv("POW_ENABLED", "1") == "1"
     pow_difficulty_bits: int = int(os.getenv("POW_DIFFICULTY_BITS", "17"))
     # 적응형 PoW: 최근 실패/과다요청 세션엔 난이도를 올려 봇 재시도 비용을 계단식 상승.
