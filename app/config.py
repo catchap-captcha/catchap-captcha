@@ -59,6 +59,12 @@ class Settings:
     rotation_cooldown_seconds: int = int(os.getenv("ROTATION_COOLDOWN_SECONDS", "300"))
     pow_enabled: bool = os.getenv("POW_ENABLED", "1") == "1"
     pow_difficulty_bits: int = int(os.getenv("POW_DIFFICULTY_BITS", "17"))
+    # 적응형 PoW: 최근 실패/과다요청 세션엔 난이도를 올려 봇 재시도 비용을 계단식 상승.
+    pow_stepup_bits: int = int(os.getenv("POW_STEPUP_BITS", "4"))
+    pow_stepup_failures: int = int(os.getenv("POW_STEPUP_FAILURES", "1"))
+    pow_stepup_challenges: int = int(os.getenv("POW_STEPUP_CHALLENGES", "5"))
+    # 허니팟: 빈 영역에 심는 투명 함정 히트영역 수(사람은 안 건드림, 열거 봇만 집음).
+    honeypot_count: int = int(os.getenv("HONEYPOT_COUNT", "1"))
     # The behavior model runs as a separate internal service. Browser clients
     # never receive this key and cannot call the model directly.
     behavior_ai_url: str = os.getenv("BEHAVIOR_AI_URL", "")
@@ -73,6 +79,9 @@ class Settings:
     # Local-only diagnostics. Keep this disabled outside a developer-run test
     # because behavior scores must not be exposed to CAPTCHA clients.
     behavior_debug_response: bool = os.getenv("BEHAVIOR_DEBUG_RESPONSE", "false").lower() == "true"
+    # active 승격 go/no-go 기준: 사람 프록시(정답 통과) 표본 최소치 + 허용 오탐 프록시율.
+    behavior_promote_min_passed: int = int(os.getenv("BEHAVIOR_PROMOTE_MIN_PASSED", "500"))
+    behavior_promote_max_fp_rate: float = float(os.getenv("BEHAVIOR_PROMOTE_MAX_FP_RATE", "0.02"))
     final_dir: Path = path_setting("FINAL_DIR", "data/final")
     labeling_dir: Path = path_setting("LABELING_DIR", "data/labeling")
     runtime_dir: Path = path_setting("RUNTIME_DIR", "data/runtime")

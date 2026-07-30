@@ -229,8 +229,14 @@ class Database:
     @contextmanager
     def connection(self, autocommit: bool = False) -> Iterator[pymysql.Connection]:
         conn = self._connect(autocommit)
-        try: yield conn
-        finally: conn.close()
+        try:
+            yield conn
+            if not autocommit: conn.commit()   # 정상 종료 시 자동 커밋(쓰기 누락 함정 제거)
+        except Exception:
+            if not autocommit: conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def initialize(self) -> None:
         with self.connection() as conn, conn.cursor() as cur:
@@ -243,7 +249,9 @@ class Database:
                 for alter in ("ALTER TABLE captcha_challenges_v2 ADD COLUMN lecture_id VARCHAR(128) NULL",
                               "ALTER TABLE captcha_tokens ADD COLUMN lecture_id VARCHAR(128) NULL",
                               "ALTER TABLE captcha_questions ADD COLUMN served_count INT NOT NULL DEFAULT 0",
-                              "ALTER TABLE captcha_questions ADD COLUMN last_served_at DATETIME(6) NULL"):
+                              "ALTER TABLE captcha_questions ADD COLUMN last_served_at DATETIME(6) NULL",
+                              "ALTER TABLE captcha_challenges_v2 ADD COLUMN pow_bits TINYINT UNSIGNED NOT NULL DEFAULT 0",
+                              "ALTER TABLE captcha_challenges_v2 ADD COLUMN honeypot_ids TEXT NULL"):
                     try: cur.execute(alter); conn.commit()
                     except Exception: conn.rollback()
             finally: cur.execute("SELECT RELEASE_LOCK('security_captcha_v2_schema')")
@@ -251,6 +259,31 @@ class Database:
     def ping(self) -> bool:
         with self.connection(True) as conn, conn.cursor() as cur:
             cur.execute("SELECT 1 ok"); return cur.fetchone()["ok"] == 1
+
+    def behavior_shadow_summary(self, days: int) -> dict[str, Any]:
+        """behavior-AI 승격 준비도. 사람 프록시(정답 통과)에 대한 오탐 프록시(step_up율)를 계산."""
+        empty = {"table": False, "total": 0}
+        with self.connection(True) as conn, conn.cursor() as cur:
+            cur.execute("""SELECT COUNT(*) n FROM information_schema.tables
+                           WHERE table_schema=%s AND table_name='behavior_shadow_predictions'""", (self.settings.db_name,))
+            if cur.fetchone()["n"] == 0:
+                return empty
+            cur.execute("""SELECT
+                  COUNT(*) total,
+                  SUM(recommended_action IN ('step_up','step_up_and_rate_limit')) would_block,
+                  SUM(main_captcha_verdict='passed') passed,
+                  SUM(main_captcha_verdict='passed' AND recommended_action IN ('step_up','step_up_and_rate_limit')) passed_would_block,
+                  SUM(status='scored') scored
+                FROM behavior_shadow_predictions
+                WHERE created_at > UTC_TIMESTAMP() - INTERVAL %s DAY""", (days,))
+            r = cur.fetchone() or {}
+            cur.execute("""SELECT COALESCE(recommended_action,'(none)') a, COUNT(*) n
+                FROM behavior_shadow_predictions WHERE created_at > UTC_TIMESTAMP() - INTERVAL %s DAY GROUP BY a""", (days,))
+            actions = {row["a"]: row["n"] for row in cur.fetchall()}
+        passed = int(r.get("passed") or 0); pwb = int(r.get("passed_would_block") or 0)
+        return {"table": True, "days": days, "total": int(r.get("total") or 0), "scored": int(r.get("scored") or 0),
+                "would_block": int(r.get("would_block") or 0), "passed": passed, "passed_would_block": pwb,
+                "fp_proxy_rate": round(pwb / passed, 4) if passed else None, "action_dist": actions}
 
     def has_active_question(self) -> bool:
         with self.connection(True) as conn, conn.cursor() as cur:
@@ -290,9 +323,9 @@ class Database:
     def create_challenge(self, challenge: dict[str, Any], mappings: list[tuple[int, str]], behavior_nonce: str) -> None:
         with self.connection() as conn, conn.cursor() as cur:
             cur.execute("""INSERT INTO captcha_challenges_v2
-              (id,question_id,session_id,purpose,lecture_id,expires_at,status,created_at,client_ip_hash)
-              VALUES(%s,%s,%s,%s,%s,%s,'issued',%s,%s)""",
-              tuple(challenge.get(k) for k in ("id","question_id","session_id","purpose","lecture_id","expires_at","created_at","client_ip_hash")))
+              (id,question_id,session_id,purpose,lecture_id,expires_at,status,created_at,client_ip_hash,pow_bits,honeypot_ids)
+              VALUES(%s,%s,%s,%s,%s,%s,'issued',%s,%s,%s,%s)""",
+              tuple(challenge.get(k) for k in ("id","question_id","session_id","purpose","lecture_id","expires_at","created_at","client_ip_hash","pow_bits","honeypot_ids")))
             cur.executemany("INSERT INTO captcha_challenge_objects(challenge_id,object_id,temporary_object_id) VALUES(%s,%s,%s)",
                             [(challenge["id"], object_id, temporary) for object_id, temporary in mappings])
             cur.execute(

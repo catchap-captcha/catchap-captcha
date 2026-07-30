@@ -137,9 +137,9 @@ class _FakeRequest:
     headers: dict[str, str] = {}
 
 
-def _verify(pow_nonce: str | None, events: list | None = None):
+def _verify(pow_nonce: str | None, events: list | None = None, selected: list | None = None):
     payload = main.VerifyRequest(
-        selected_object_ids=[TARGET],
+        selected_object_ids=selected or [TARGET],
         session_id=SESSION_ID,
         duration_ms=1500,
         events=events or [],
@@ -192,3 +192,35 @@ def test_missing_batches_skip_the_model_and_keep_the_reason(stub, monkeypatch):
     # 발동하지 않지만(active 에서만 step_up), 그 다음의 ms 규칙 게이트가 0 이벤트를
     # 높은 위험으로 채점해 잡는다. 두 층이 겹쳐 있는 셈이므로 그대로 고정한다.
     assert result["success"] is False
+
+
+def test_honeypot_submission_blocks_before_the_model_is_called(stub, monkeypatch):
+    """허니팟 게이트의 현재 동작을 고정한다 — 그리고 그 대가를 눈에 보이게 둔다.
+
+    허니팟을 집었다는 건 확정 봇이다. 차단은 맞다. 다만 지금은 AI 채점 **이전에**
+    return 하므로 그 궤적이 버려진다. 라벨이 확실한 봇 궤적은 우리가 가장 부족한
+    데이터라, 채점 후 차단으로 순서를 바꾸면 사용자 영향 없이(어차피 봇이다)
+    표본을 얻을 수 있다. 민서님 보안 게이트라 임의로 바꾸지 않고 고정만 해둔다.
+    """
+    challenge = main.database.challenge_for_verify(CHALLENGE_ID)
+    trap = "tmp_honeypot"
+    monkeypatch.setattr(main.database, "challenge_for_verify",
+                        lambda _cid: {**challenge, "honeypot_ids": f'["{trap}"]'})
+
+    result = _verify(_solve_pow(CHALLENGE_ID, 8), selected=[trap])
+
+    assert result["blocked"] is True
+    assert result["reason"] == "honeypot"
+    assert "payload" not in stub, "허니팟 차단이 모델 호출 뒤에 일어났다"
+
+
+def test_adaptive_pow_uses_the_bits_stored_on_the_challenge(stub, monkeypatch):
+    """적응형 PoW: 검증은 발급 시 저장된 난이도를 쓴다(전역 기본값이 아니라)."""
+    challenge = main.database.challenge_for_verify(CHALLENGE_ID)
+    monkeypatch.setattr(main.database, "challenge_for_verify",
+                        lambda _cid: {**challenge, "pow_bits": 12})
+
+    # 전역 기본값(8)로 푼 해는 저장된 12비트를 만족하지 못한다.
+    assert _verify(_solve_pow(CHALLENGE_ID, 8)) == {"success": False, "pow_failed": True}
+    # 12비트로 풀면 통과한다.
+    assert _verify(_solve_pow(CHALLENGE_ID, 12))["success"] is True
