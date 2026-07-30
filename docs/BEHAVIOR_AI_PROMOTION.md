@@ -18,7 +18,14 @@ GET /api/admin/behavior-shadow?days=7   (X-Captcha-Admin-Key 필요)
 **go/no-go 기준**(`.env`로 조절):
 - `BEHAVIOR_PROMOTE_MIN_PASSED`(기본 500): 사람 프록시 표본 최소치
 - `BEHAVIOR_PROMOTE_MAX_FP_RATE`(기본 0.02=2%): 허용 오탐 프록시율
-- `verdict: "ready"`가 떠야 승격 검토.
+- `would_block > 0`(고정): 아무것도 안 잡는 모델이 FP 0%로 통과하는 걸 차단(봇 저지 바닥)
+- `verdict: "ready"`가 떠야 승격 **검토**.
+
+> ⚠️ **이 엔드포인트는 시도(attempt) 단위 거친 관측 지표입니다. 최종 go/no-go 아님.** (sw 조성원 지적)
+> - **시도 단위 평균은 헤비 유저에 가려집니다** — 전체 FP 2%여도 특정 참여자는 계속 걸릴 수 있음(재검증에서 54명 중 4명이 개별 3% 초과 관측).
+> - **최종 판단은 참여자 단위(participant_id)별 FRR로** — sw의 `ai_behavior_attempts`(participant_id 보유)에서 참여자별로 집계해 판단.
+> - **봇 기준도 필요** — FP뿐 아니라 ASR(봇 통과율)/최소 저지량도 함께 봐야 함.
+> - **표본 목표: 시도 500 + 참여자 30명 이상**(500건은 5명이 100번씩 풀어도 채워짐).
 
 > 2026-07-30 현재: 표본 12 → `insufficient_data`. **실사용자 트래픽이 없어(방화벽 뒤) 데이터가 안 쌓임.** 공개 개방/베타로 실트래픽이 흘러야 판단 가능.
 

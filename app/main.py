@@ -954,18 +954,24 @@ def admin_behavior_shadow(days: int = Query(default=7, ge=1, le=90), x_captcha_a
     require_admin(x_captcha_admin_key)
     s = database.behavior_shadow_summary(days)
     min_passed = settings.behavior_promote_min_passed; max_fp = settings.behavior_promote_max_fp_rate
-    fp = s.get("fp_proxy_rate")
-    ready = bool(s.get("table") and s.get("passed", 0) >= min_passed and fp is not None and fp <= max_fp)
+    fp = s.get("fp_proxy_rate"); would_block = s.get("would_block", 0)
+    # 봇 저지 바닥: 아무것도 안 잡는 모델은 FP 0%로 통과하므로 would_block>0을 필수 조건에 추가(sw 지적 ②).
+    ready = bool(s.get("table") and s.get("passed", 0) >= min_passed
+                 and fp is not None and fp <= max_fp and would_block > 0)
     if not s.get("table"):
         verdict = "no_data"; reason = "behavior_shadow_predictions 테이블 없음(모델 미연동)"
     elif s.get("passed", 0) < min_passed:
         verdict = "insufficient_data"; reason = f"사람 프록시 표본 {s.get('passed',0)} < 최소 {min_passed}"
+    elif would_block == 0:
+        verdict = "no_detection"; reason = "모델이 아무것도 저지하지 않음(would_block=0) — 봇 탐지 무효"
     elif fp is not None and fp > max_fp:
         verdict = "fp_too_high"; reason = f"오탐 프록시 {fp:.2%} > 허용 {max_fp:.2%}"
     else:
-        verdict = "ready"; reason = "기준 충족 — 카나리 승격 검토 가능"
-    return {"summary": s, "criteria": {"min_passed": min_passed, "max_fp_rate": max_fp},
+        verdict = "ready"; reason = "관측 기준 충족 — 단, 최종 go/no-go는 참여자 단위 집계로(런북 참조)"
+    # ⚠️ 시도 단위 거친 관측 지표. 최종 판단은 participant_id 기반 참여자별 FRR로(BEHAVIOR_AI_PROMOTION.md).
+    return {"summary": s, "criteria": {"min_passed": min_passed, "max_fp_rate": max_fp, "min_would_block": 1},
             "ready": ready, "verdict": verdict, "reason": reason,
+            "granularity": "attempt-level (rough observational)",
             "current_policy_mode": settings.behavior_policy_mode}
 
 
