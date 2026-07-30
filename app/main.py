@@ -30,13 +30,11 @@ from .behavior_client import (
 )
 from .config import settings
 from .db import Database, utcnow
-from .behavior_client import BehaviorAIClient, behavior_attempt_id, build_predict_payload, resolve_final_verdict
 
 
 database = Database(settings)
-# 행동 AI 브릿지. URL/키가 비면 enabled=False → 캡챠 판정에 영향 없음.
-behavior_ai = BehaviorAIClient(settings.behavior_ai_url, settings.behavior_ai_backend_key, settings.behavior_ai_timeout_seconds)
 settings.validate()
+# 행동 AI 브릿지. URL/키가 비면 enabled=False → 캡챠 판정에 영향 없음.
 behavior_ai = BehaviorAIClient(
     settings.behavior_ai_url,
     settings.behavior_ai_backend_key,
