@@ -135,8 +135,32 @@ def _json_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
 
+# 좌표 정밀도. 저장·재읽기를 왕복해도 배치 해시가 같아야 하는데, 17자리 float 은
+# JSON 컬럼을 거치면서 마지막 자리가 흔들려 payload_hash 재검증이 깨진다(실측:
+# 원본 정밀도 → behavior_batch_payload_invalid, 반올림 → 통과). 6자리면 500px
+# 이미지에서 0.0005px 이라 판별에 쓰는 정밀도보다 한참 아래다.
+_COORD_PRECISION = 6
+
+
+def _canonical_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """해시·저장에 쓸 정규형. 좌표를 고정 자릿수로 낮춰 왕복을 안정시킨다.
+
+    저장 시점과 검증 시점에 **같은 함수**를 통과시키는 것이 요점이다. 저장 계층이
+    1e-6 미만으로 값을 흔들어도 두 해시가 갈라지지 않는다.
+    """
+    canonical: list[dict[str, Any]] = []
+    for event in events:
+        row = dict(event)
+        for axis in ("x", "y"):
+            value = row.get(axis)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                row[axis] = round(float(value), _COORD_PRECISION)
+        canonical.append(row)
+    return canonical
+
+
 def _payload_hash(events: list[dict[str, Any]]) -> str:
-    return hashlib.sha256(_json_bytes(events)).hexdigest()
+    return hashlib.sha256(_json_bytes(_canonical_events(events))).hexdigest()
 
 
 def _receipt_timestamp(value: datetime) -> str:
@@ -434,7 +458,7 @@ class Database:
                     expected_previous,
                     payload_hash,
                     receipt,
-                    json.dumps(events, ensure_ascii=False, separators=(",", ":")),
+                    json.dumps(_canonical_events(events), ensure_ascii=False, separators=(",", ":")),
                     received_at,
                 ),
             )

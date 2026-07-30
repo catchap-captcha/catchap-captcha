@@ -281,3 +281,57 @@ def test_stop_go_signal_flags_sparse_pause_restart_without_terminal_correction()
 
     assert signal["detected"] is False
     assert signal["sparse_pause_restart"] is True
+
+
+def test_payload_hash_survives_a_storage_round_trip_of_high_precision_floats():
+    """배치 해시가 저장→재읽기 왕복에서 살아남아야 한다.
+
+    이게 깨지면 verify 가 behavior_batch_payload_invalid 로 배치를 통째로 버리고,
+    모델은 호출조차 되지 않는다. 그런데 캡차는 정상 통과하므로(fail-open) 화면에도
+    로그에도 아무 증상이 없다 — 수집이 조용히 0 이 된다. 실제로 그랬다.
+
+    17자리 float 이 JSON 컬럼을 거치며 마지막 자리가 흔들리는 것이 원인이었다.
+    여기서는 그 흔들림을 1e-12 만큼 직접 주입해 재현한다.
+    """
+    import json
+
+    from app.db import _canonical_events, _payload_hash
+
+    events = [
+        {"seq": 0, "type": "challenge_loaded", "object_id": None,
+         "x": None, "y": None, "timestamp_ms": 1_700_000_000_000},
+        {"seq": 1, "type": "pointer_down", "object_id": "tmp_a",
+         "x": 0.20 + (0.845 - 0.20) * (1 / 7), "y": 0.30000000000000004,
+         "timestamp_ms": 1_700_000_000_045},
+        {"seq": 2, "type": "drop", "object_id": "tmp_a",
+         "x": 0.8449999999999999, "y": 0.7999999999999999,
+         "timestamp_ms": 1_700_000_000_090},
+    ]
+
+    ingest = _payload_hash(events)
+
+    # 저장 계층이 마지막 자리를 흔든 뒤 되돌려준 상태
+    drifted = json.loads(json.dumps(_canonical_events(events)))
+    for row in drifted:
+        if isinstance(row.get("x"), float):
+            row["x"] += 1e-12
+            row["y"] -= 1e-12
+
+    assert _payload_hash(drifted) == ingest, "왕복 후 배치 해시가 달라졌다"
+
+
+def test_canonical_events_does_not_touch_anything_but_coordinates():
+    """정규화가 좌표 외 필드를 건드리면 순번·타입 검증이 엉킨다."""
+    from app.db import _canonical_events
+
+    events = [{"seq": 3, "type": "pointer_move", "object_id": "tmp_a",
+               "x": 0.123456789, "y": None, "timestamp_ms": 1_700_000_000_123}]
+    out = _canonical_events(events)
+
+    assert out[0]["seq"] == 3
+    assert out[0]["type"] == "pointer_move"
+    assert out[0]["object_id"] == "tmp_a"
+    assert out[0]["timestamp_ms"] == 1_700_000_000_123
+    assert out[0]["y"] is None
+    assert out[0]["x"] == pytest.approx(0.123457, abs=1e-9)
+    assert events[0]["x"] == 0.123456789, "입력을 제자리에서 바꾸면 안 된다"
