@@ -207,7 +207,8 @@ function CaptchaApp() {
           </div>}
         </div>
         <div className="cc-rowhead"><span className="cc-tag">정답존</span>{selected.length > 0 && <button className="cc-link muted" onClick={clearAll}>비우기</button>}</div>
-        <div ref={dropRef} className={`cc-zone ${dragging ? "armed" : ""} ${selected.length ? "filled" : ""}`} onPointerUp={drop}>
+        <div ref={dropRef} className={`cc-zone ${dragging ? "armed" : ""} ${selected.length ? "filled" : ""}`} onPointerUp={drop}
+          style={challenge?.drop_zone ? { marginLeft:`${(challenge.drop_zone.x||0)*100}%`, width:`${(challenge.drop_zone.width||1)*100}%` } : undefined}>
           {selected.length
             ? <div className="cc-chips">{selected.map((id) => { const obj=challenge.objects.find((item)=>item.object_id===id); return <button key={id} className="cc-chip" onClick={()=>remove(id)} title="선택 취소"><img src={obj.preview_url} alt="선택한 객체"/><span className="cc-chip-x">×</span></button>; })}</div>
             : <span className="cc-zone-empty">이미지에서 정답 객체를 이곳으로 드래그하세요</span>}

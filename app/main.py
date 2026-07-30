@@ -137,6 +137,20 @@ def pow_verify(seed: str, nonce: str | None, bits: int) -> bool:
     return _leading_zero_bits(digest) >= bits
 
 
+def _place_honeypot(boxes: list[tuple], rng, size_min: float = 0.06, size_max: float = 0.10, margin: float = 0.03, tries: int = 24):
+    """기존 객체와 겹치지 않는 빈 영역 좌표를 찾는다. 못 찾으면 None(그 챌린지는 허니팟 없음)."""
+    for _ in range(tries):
+        w = rng.uniform(size_min, size_max); h = rng.uniform(size_min, size_max)
+        x = rng.uniform(0.0, 1.0 - w); y = rng.uniform(0.0, 1.0 - h)
+        ok = True
+        for bx, by, bw, bh in boxes:
+            if not (x + w + margin < bx or x > bx + bw + margin or y + h + margin < by or y > by + bh + margin):
+                ok = False; break
+        if ok:
+            return (round(x, 4), round(y, 4), round(w, 4), round(h, 4))
+    return None
+
+
 def automation_score(sig: dict | None) -> int:
     """자동화 브라우저 신호 점수. webdriver/헤드리스는 순정 자동화의 강한 흔적."""
     if not isinstance(sig, dict): return 0
@@ -388,19 +402,30 @@ def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_
     if settings.pow_enabled and (pattern["session_failures_10m"] >= settings.pow_stepup_failures
                                  or pattern["session_challenges_10m"] >= settings.pow_stepup_challenges):
         pow_bits += settings.pow_stepup_bits
+    rng = secrets.SystemRandom()
     mappings = [(obj["id"], f"tmp_{secrets.token_urlsafe(8)}") for obj in question["objects"] if obj["role"] != "invalid"]
     temporary = {object_id: temp for object_id, temp in mappings}
-    database.create_challenge({"id":challenge_id,"question_id":question["id"],"session_id":payload.session_id,
-        "purpose":payload.purpose,"lecture_id":payload.lecture_id,"expires_at":expires,"created_at":now,
-        "client_ip_hash":ip_hash,"pow_bits":pow_bits}, mappings)
     objects = [{"object_id":temporary[obj["id"]], "hit_region":[obj["bbox_x"],obj["bbox_y"],obj["bbox_width"],obj["bbox_height"]],
                 "preview_url":f"/api/captcha/assets/{challenge_id}/{temporary[obj['id']]}"}
                for obj in question["objects"] if obj["id"] in temporary]
-    secrets.SystemRandom().shuffle(objects)
+    # ② 허니팟: 빈 영역에 투명 함정 히트영역 추가. 사람은 안 건드리고 열거 봇만 집음 → 제출 시 봇 확정.
+    honeypot_ids = []
+    boxes = [(float(o["bbox_x"]),float(o["bbox_y"]),float(o["bbox_width"]),float(o["bbox_height"])) for o in question["objects"]]
+    for _ in range(settings.honeypot_count):
+        hp = _place_honeypot(boxes, rng)
+        if not hp: continue
+        tid = f"tmp_{secrets.token_urlsafe(8)}"; honeypot_ids.append(tid); boxes.append(hp)
+        objects.append({"object_id":tid,"hit_region":list(hp),"preview_url":f"/api/captcha/assets/{challenge_id}/{tid}"})
+    rng.shuffle(objects)
+    database.create_challenge({"id":challenge_id,"question_id":question["id"],"session_id":payload.session_id,
+        "purpose":payload.purpose,"lecture_id":payload.lecture_id,"expires_at":expires,"created_at":now,
+        "client_ip_hash":ip_hash,"pow_bits":pow_bits,"honeypot_ids":json.dumps(honeypot_ids) if honeypot_ids else None}, mappings)
+    # ③ 드롭존 랜덤화: 위치·너비를 챌린지마다 바꿔 좌표 하드코딩 봇을 무력화(드래그 방식 동일).
+    dz_x = round(rng.uniform(0.0, 0.35), 3); dz_w = round(rng.uniform(0.55, 0.80), 3)
     response = {"challenge_id":challenge_id,"type":"object_drag","instruction":question["instruction_ko"],
             "image_url":f"/api/captcha/assets/{challenge_id}/image","width":question["image_width"],
             "height":question["image_height"],"objects":objects,
-            "drop_zone":{"x":0.72,"y":0.68,"width":0.25,"height":0.25},"expires_at":expires.isoformat()+"Z"}
+            "drop_zone":{"x":dz_x,"y":0.0,"width":dz_w,"height":1.0},"expires_at":expires.isoformat()+"Z"}
     if settings.pow_enabled:
         # 연산 퍼즐: 클라이언트가 사람이 문제를 푸는 동안(수 초) 백그라운드로 해결 → 체감 0.
         response["pow"] = {"seed": challenge_id, "bits": pow_bits}
@@ -433,7 +458,12 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
     if settings.pow_enabled and not pow_verify(challenge_id, payload.pow_nonce, _pow_bits):
         # 연산 퍼즐 미해결 = 정당한 클라이언트 비용을 치르지 않은 요청. 정답/행동 채점 이전에 저렴하게 차단.
         return {"success":False,"pow_failed":True}
-    submitted=set(payload.selected_object_ids); targets={o["temporary_object_id"] for o in challenge["objects"] if o["role"]=="target"}
+    submitted=set(payload.selected_object_ids)
+    # ② 허니팟 게이트: 함정 히트영역을 하나라도 집었으면 = 열거/자동화 봇 확정. 즉시 차단.
+    honeypots=set(json.loads(challenge["honeypot_ids"])) if challenge.get("honeypot_ids") else set()
+    if submitted & honeypots:
+        return {"success":False,"blocked":True,"risk_level":"automated","reason":"honeypot"}
+    targets={o["temporary_object_id"] for o in challenge["objects"] if o["role"]=="target"}
     valid={o["temporary_object_id"] for o in challenge["objects"]}; correct=submitted==targets and submitted <= valid
     reason=None if correct else ("unknown_object" if not submitted<=valid else "incorrect_selection")
     # 행동 AI 그림자 채점: 실트래픽을 모델 서비스에 흘려 점수 수집. shadow에서는 캡챠 판정 불변.

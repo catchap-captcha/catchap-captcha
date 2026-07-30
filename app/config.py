@@ -61,6 +61,8 @@ class Settings:
     pow_stepup_bits: int = int(os.getenv("POW_STEPUP_BITS", "4"))
     pow_stepup_failures: int = int(os.getenv("POW_STEPUP_FAILURES", "1"))
     pow_stepup_challenges: int = int(os.getenv("POW_STEPUP_CHALLENGES", "5"))
+    # 허니팟: 빈 영역에 심는 투명 함정 히트영역 수(사람은 안 건드림, 열거 봇만 집음).
+    honeypot_count: int = int(os.getenv("HONEYPOT_COUNT", "1"))
     # 행동 AI(별도 내부 모델 서비스). URL/키가 비면 비활성 → 캡챠 판정에 영향 없음(A와 동일 안전장치).
     behavior_ai_url: str = os.getenv("BEHAVIOR_AI_URL", "")
     behavior_ai_backend_key: str = os.getenv("BEHAVIOR_AI_BACKEND_KEY", "")
