@@ -555,6 +555,12 @@ async def lifespan(_: FastAPI):
                  settings.runtime_dir / "attempts", settings.runtime_dir / "behavior-events", settings.runtime_dir / "logs"]:
         path.mkdir(parents=True, exist_ok=True)
     database.initialize()
+    # ① Origin 검증은 ALLOWED_ORIGINS가 실도메인일 때만 발동. 기본값 '*'면 조용히 무력화되므로
+    # 실서비스에서 놓치지 않도록 시작 시 경고를 남긴다(설정은 배포 .env에서).
+    if not settings.allowed_origins or "*" in settings.allowed_origins:
+        import sys
+        print("[SECURITY] ALLOWED_ORIGINS=* → Origin 검증 비활성 상태입니다. "
+              "실서비스에서는 캡차 서빙 도메인을 ALLOWED_ORIGINS에 설정하세요.", file=sys.stderr)
     yield
 
 
@@ -565,6 +571,17 @@ app.add_middleware(CORSMiddleware, allow_origins=list(settings.allowed_origins),
 # IP당 분당 요청 상한 — 대량요청 봇(다운로드/크롤러/API 플러드/애플리케이션 홍수) 차단.
 _rate_hits: dict[str, deque] = {}
 
+
+def _apply_security_headers(response):
+    """② 임베드 위젯용 방어 헤더. 프레이밍은 전면차단이 아니라 허용목록(frame-ancestors)."""
+    emb = settings.embed_origins
+    frame_ancestors = "*" if "*" in emb else (" ".join(("'self'", *emb)) if emb else "'self'")
+    response.headers["Content-Security-Policy"] = f"frame-ancestors {frame_ancestors}"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
+
+
 @app.middleware("http")
 async def rate_limit(request: Request, call_next):
     if request.url.path.startswith("/health"):
@@ -573,11 +590,11 @@ async def rate_limit(request: Request, call_next):
     dq = _rate_hits.setdefault(ip, deque())
     while dq and now - dq[0] > 60: dq.popleft()
     if len(dq) >= settings.rate_limit_per_minute:
-        return JSONResponse({"detail": "Too many requests"}, status_code=429)
+        return _apply_security_headers(JSONResponse({"detail": "Too many requests"}, status_code=429))
     dq.append(now)
     if len(_rate_hits) > 20000:  # 메모리 보호: 비활성 IP 정리
         for k in [k for k, v in list(_rate_hits.items()) if not v or now - v[-1] > 120]: _rate_hits.pop(k, None)
-    return await call_next(request)
+    return _apply_security_headers(await call_next(request))
 
 
 @app.get("/health/live")
@@ -612,7 +629,9 @@ def ready():
 
 
 @app.get("/api/config")
-def public_config(): return {"siteKey": settings.site_key}
+def public_config():
+    # ③ 프론트가 postMessage targetOrigin을 이 목록으로만 좁히도록 서버가 허용 임베드 출처를 내려준다.
+    return {"siteKey": settings.site_key, "embedOrigins": list(settings.embed_origins)}
 
 
 @app.post("/api/captcha/challenges", status_code=status.HTTP_201_CREATED)
@@ -684,6 +703,7 @@ def challenge_asset(challenge_id: str, asset_id: str):
 def collect_behavior_batch(
     challenge_id: str,
     payload: BehaviorBatchRequest,
+    request: Request,
     x_captcha_site_key: str | None = Header(None),
 ):
     """Store a short behavior batch before answer verification.
@@ -691,7 +711,9 @@ def collect_behavior_batch(
     ``nonce`` and the receipt chain bind batches to one issued challenge. The
     final verify endpoint deliberately scores only these server-side records.
     """
-    require_header(x_captcha_site_key, settings.site_key, "Invalid site key")
+    # ① 세 엔드포인트(create_challenge·verify·여기)의 Origin 검사가 일관돼야 한다.
+    # 배치만 빠져 있으면 허용목록을 켜도 이 경로로 들어올 수 있다.
+    require_header(x_captcha_site_key, settings.site_key, "Invalid site key"); check_origin(request)
     if settings.behavior_event_transport == "off":
         raise HTTPException(409, "behavior_transport_disabled")
     challenge = database.challenge_for_verify(challenge_id)
@@ -733,13 +755,14 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
         # 연산 퍼즐 미해결 = 정당한 클라이언트 비용을 치르지 않은 요청. 정답/행동 채점 이전에 저렴하게 차단.
         return {"success":False,"pow_failed":True}
     submitted=set(payload.selected_object_ids)
-    # ② 허니팟 게이트: 함정 히트영역을 하나라도 집었으면 = 열거/자동화 봇 확정. 즉시 차단.
+    # ⑤ 허니팟: 함정 히트영역을 하나라도 집었으면 = 열거/자동화 봇 확정. 단 여기서 즉시 return하지 않고
+    # 행동 채점·기록까지 통과시켜 '확정 봇 궤적'(가장 부족한 라벨 데이터)을 확보한 뒤 차단한다.
+    # 어차피 봇이므로 사용자 영향은 0.
     honeypots=set(json.loads(challenge["honeypot_ids"])) if challenge.get("honeypot_ids") else set()
-    if submitted & honeypots:
-        return {"success":False,"blocked":True,"risk_level":"automated","reason":"honeypot"}
+    hit_honeypot=bool(submitted & honeypots)
     targets={o["temporary_object_id"] for o in challenge["objects"] if o["role"]=="target"}
     valid={o["temporary_object_id"] for o in challenge["objects"]}; correct=submitted==targets and submitted <= valid
-    reason=None if correct else ("unknown_object" if not submitted<=valid else "incorrect_selection")
+    reason="honeypot" if hit_honeypot else (None if correct else ("unknown_object" if not submitted<=valid else "incorrect_selection"))
     question = database.get_question(challenge["question_id"])
     if question is None:
         raise HTTPException(404, "Question not found")
@@ -845,6 +868,13 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
             "stop_go_signal": stop_go_signal,
             "batch_delivery_timing": batch_delivery_timing,
         }
+    # ⑤ 봇 궤적을 행동채점(shadow)·기록에 흘려보낸 뒤에 차단한다. 확정 봇의 궤적은 우리가 가장
+    # 부족한 라벨 데이터인데, 채점 전에 return 하면 그게 버려진다. 어차피 봇이라 사용자 영향 0.
+    if hit_honeypot:
+        response = {"success":False,"blocked":True,"risk_level":"automated","reason":"honeypot"}
+        if debug_payload is not None:
+            response["behavior_debug"] = debug_payload
+        return response
     if not correct:
         response = {"success":False,"remaining_attempts":max(0,settings.max_attempts-challenge["attempt_count"]-1)}
         if debug_payload is not None:

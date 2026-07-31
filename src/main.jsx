@@ -96,6 +96,7 @@ function CaptchaApp() {
   const dropRef = useRef(null);
   const lastMove = useRef(0);
   const powRef = useRef(null);
+  const embedOriginsRef = useRef([]);  // ③ 서버가 내려준 허용 임베드 출처(postMessage 대상 검증용)
   const challengeRef = useRef(null);
   const siteKeyRef = useRef("");
   const behaviorNonceRef = useRef("");
@@ -206,6 +207,8 @@ function CaptchaApp() {
       lastMove.current = 0;
       behaviorTransportFailedRef.current = false;
       const config = siteKey ? { siteKey } : await api("/api/config");
+      setSiteKey(config.siteKey);
+      if (config.embedOrigins) embedOriginsRef.current = config.embedOrigins;  // ③ 최초 1회 수신
       setSiteKey(config.siteKey); siteKeyRef.current = config.siteKey;
       const row = await api("/api/captcha/challenges", { method: "POST", headers: { "Content-Type": "application/json", "X-Captcha-Site-Key": config.siteKey },
         body: JSON.stringify({ purpose, risk_level: "high", session_id: sessionId(), lecture_id: lectureId }) });
@@ -250,6 +253,16 @@ function CaptchaApp() {
   };
   const remove = (id) => { setSelected((rows) => rows.filter((value) => value !== id)); record("object_removed", id); };
   const clearAll = () => { selected.forEach((id) => record("object_removed", id)); setSelected([]); };
+  // ③ postMessage 대상 출처를 "*"로 두면 악성 페이지가 캡차를 iframe으로 끼워 사람이 풀게 한 뒤
+  // 토큰을 가로챌 수 있다. 부모 출처(referrer)를 서버 허용목록으로 검증해 그 출처로만 보낸다.
+  const safeTargetOrigin = () => {
+    let parentOrigin = "";
+    try { parentOrigin = document.referrer ? new URL(document.referrer).origin : ""; } catch (e) { parentOrigin = ""; }
+    const allow = embedOriginsRef.current || [];
+    if (allow.includes("*")) return parentOrigin || "*";            // 명시적 전체허용(비권장)
+    if (allow.length) return allow.includes(parentOrigin) ? parentOrigin : null;  // 허용목록: 일치할 때만
+    return parentOrigin || null;                                    // 미설정: 부모 출처로만, "*" 금지
+  };
   const verify = async () => {
     if (!challenge || !selected.length) { setMessage("옮길 객체를 먼저 선택해주세요."); return; }
     try {
@@ -268,7 +281,10 @@ function CaptchaApp() {
       if (result.success) {
         setToken(result.captcha_token);
         setMessage("인증되었습니다.");
-        if (embed && window.parent !== window) window.parent.postMessage({ type: "catchap-verified", token: result.captcha_token, lecture_id: lectureId }, "*");
+        if (embed && window.parent !== window) {
+          const target = safeTargetOrigin();  // 허용목록 검증 실패 시 토큰 미전송(탈취 차단)
+          if (target) window.parent.postMessage({ type: "catchap-verified", token: result.captcha_token, lecture_id: lectureId }, target);
+        }
         return;
       }
       setMessage(result.blocked?"자동화 의심 행동이 감지되었습니다.":result.step_up?"추가 인증이 필요합니다.":result.pow_failed?"확인에 실패했습니다. 다시 시도합니다.":"인증에 실패하였습니다.");

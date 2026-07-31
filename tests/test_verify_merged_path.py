@@ -194,13 +194,14 @@ def test_missing_batches_skip_the_model_and_keep_the_reason(stub, monkeypatch):
     assert result["success"] is False
 
 
-def test_honeypot_submission_blocks_before_the_model_is_called(stub, monkeypatch):
-    """허니팟 게이트의 현재 동작을 고정한다 — 그리고 그 대가를 눈에 보이게 둔다.
+def test_honeypot_is_scored_before_it_is_blocked(stub, monkeypatch):
+    """허니팟 제출은 차단하되, 그 전에 모델 채점·기록을 통과시켜야 한다.
 
-    허니팟을 집었다는 건 확정 봇이다. 차단은 맞다. 다만 지금은 AI 채점 **이전에**
-    return 하므로 그 궤적이 버려진다. 라벨이 확실한 봇 궤적은 우리가 가장 부족한
-    데이터라, 채점 후 차단으로 순서를 바꾸면 사용자 영향 없이(어차피 봇이다)
-    표본을 얻을 수 있다. 민서님 보안 게이트라 임의로 바꾸지 않고 고정만 해둔다.
+    허니팟을 집었다는 건 확정 봇이고, 그 궤적은 우리가 가장 부족한 라벨 데이터다.
+    처음에는 채점 이전에 return 해서 그게 버려지고 있었다(ms fd6ab25 ⑤ 에서 수정).
+    차단 자체는 그대로이므로 사용자 영향은 0 이다.
+
+    되돌아가기 쉬운 종류라 — 게이트를 위로 올리면 다시 버려진다 — 여기서 못박는다.
     """
     challenge = main.database.challenge_for_verify(CHALLENGE_ID)
     trap = "tmp_honeypot"
@@ -211,7 +212,8 @@ def test_honeypot_submission_blocks_before_the_model_is_called(stub, monkeypatch
 
     assert result["blocked"] is True
     assert result["reason"] == "honeypot"
-    assert "payload" not in stub, "허니팟 차단이 모델 호출 뒤에 일어났다"
+    # 차단 전에 모델이 호출됐어야 한다 — 이게 이번 수정의 요점이다.
+    assert "payload" in stub, "허니팟이 채점 이전에 차단됐다 — 봇 궤적이 버려진다"
 
 
 def test_adaptive_pow_uses_the_bits_stored_on_the_challenge(stub, monkeypatch):

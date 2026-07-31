@@ -38,6 +38,11 @@ class Settings:
     allowed_origins: tuple[str, ...] = tuple(
         part.strip() for part in os.getenv("ALLOWED_ORIGINS", "*").split(",") if part.strip()
     )
+    # 캡차를 iframe으로 임베드해도 되는 출처 허용목록. CSP frame-ancestors(②)와
+    # 프론트 postMessage targetOrigin 검증(③)에 함께 쓰인다. 미설정 시 self만 허용.
+    embed_origins: tuple[str, ...] = tuple(
+        part.strip() for part in os.getenv("EMBED_ORIGINS", "").split(",") if part.strip()
+    )
     trust_proxy: bool = os.getenv("TRUST_PROXY", "false").lower() == "true"
     db_name: str = os.getenv("DB_NAME", "captcha_ms")
     db_user: str = os.getenv("DB_USER", "catchap_dba")
