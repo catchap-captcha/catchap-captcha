@@ -102,10 +102,10 @@ def waypoints(kind, sx, sy, dx, dy):
     return wps
 
 
-def build_events(kind, oid, hr, dz, timing, rng):
-    """궤적=프로파일 고유, 타이밍=축(synthetic 산술 / real 실제 sleep+벽시계)."""
+def build_events(kind, drag_objs, dz, timing, rng):
+    """궤적=프로파일 고유, 타이밍=축(synthetic/real). drag_objs=[(oid,hit_region),...] 를 순서대로 끈다.
+    상호작용 규모 축 검증용: 1개만 끌기(one) vs 여러 개 끌기(all)."""
     real = (timing == "real")
-    sx, sy = hr[0] + hr[2] / 2, hr[1] + hr[3] / 2
     dx, dy = dz.get("x", 0.72) + dz.get("width", 0.25) / 2, 0.8
 
     def advance(prev, interval_ms):
@@ -116,58 +116,70 @@ def build_events(kind, oid, hr, dz, timing, rng):
 
     t = int(time.time() * 1000)
     e = [ev(0, "challenge_loaded", None, None, None, t)]; seq = 1
-    t = advance(t, rng.randint(600, 1500) if real else 300)   # 리딩 후 잡기(real=사람이 문제 봄)
-    e.append(ev(seq, "pointer_down", oid, sx, sy, t)); seq += 1
-    e.append(ev(seq, "drag_start", oid, sx, sy, t)); seq += 1
-    for (x, y, synth_iv) in waypoints(kind, sx, sy, dx, dy):
-        iv = rng.randint(55, 160) if real else synth_iv       # real=사람 속도 이동간격
-        t = advance(t, iv)
-        e.append(ev(seq, "pointer_move", oid, x, y, t)); seq += 1
-    t = advance(t, rng.randint(70, 180) if real else 40)
-    e.append(ev(seq, "drop", oid, dx, dy, t)); seq += 1
-    e.append(ev(seq, "selection_add", oid, dx, dy, t)); seq += 1
+    for (oid, hr) in drag_objs:
+        sx, sy = hr[0] + hr[2] / 2, hr[1] + hr[3] / 2
+        t = advance(t, rng.randint(500, 1200) if real else 250)   # 다음 객체로 이동/리딩
+        e.append(ev(seq, "pointer_down", oid, sx, sy, t)); seq += 1
+        e.append(ev(seq, "drag_start", oid, sx, sy, t)); seq += 1
+        for (x, y, synth_iv) in waypoints(kind, sx, sy, dx, dy):
+            iv = rng.randint(55, 160) if real else synth_iv       # real=사람 속도 이동간격
+            t = advance(t, iv)
+            e.append(ev(seq, "pointer_move", oid, x, y, t)); seq += 1
+        t = advance(t, rng.randint(70, 180) if real else 40)
+        e.append(ev(seq, "drop", oid, dx, dy, t)); seq += 1
+        e.append(ev(seq, "selection_add", oid, dx, dy, t)); seq += 1
     e.append(ev(seq, "submit", None, None, None, advance(t, 120)))
     return e
 
 
-def run_one(kind, n, timing, rng):
-    # 필드: rtbot-<유형>-<타이밍>-<n>-<uuid8> → 유형=idx2, 타이밍=idx3 로 라벨 시 분리 가능
-    sess = f"rtbot-{kind}-{timing}-{n:04d}-{uuid.uuid4().hex[:8]}"
+def run_one(kind, n, timing, drag, rng):
+    # 필드: rtbot-<유형>-<타이밍>-<드래그>-<n>-<uuid8> → 유형=idx2·타이밍=idx3·드래그=idx4
+    sess = f"rtbot-{kind}-{timing}-{drag}-{n:04d}-{uuid.uuid4().hex[:8]}"
     st, ch = post("/api/captcha/challenges", {"purpose": "lecture", "session_id": sess, "lecture_id": "REDTEAM"})
     if not ch.get("challenge_id"): return "no_challenge"
     cid = ch["challenge_id"]; nonce = ch.get("behavior_nonce")
     tg = targets(cid)
     if not tg: return "no_targets"
-    oid = tg[0]
-    hr = next((o["hit_region"] for o in ch["objects"] if o["object_id"] == oid), [0.3, 0.4, 0.1, 0.1])
-    events = build_events(kind, oid, hr, ch.get("drop_zone", {}), timing, rng)  # real이면 여기서 실제 수초 소요
-    half = len(events) // 2
+    hrmap = {o["object_id"]: o["hit_region"] for o in ch["objects"]}
+    if drag == "all":  # 규모 축: 전 객체를 끈다(이벤트만↑). 제출은 정답 타겟만 → 허니팟 회피·allow 가능.
+        drag_objs = [(o["object_id"], o["hit_region"]) for o in ch["objects"]]
+    else:              # one: 타겟 1개만 끈다.
+        drag_objs = [(tg[0], hrmap.get(tg[0], [0.3, 0.4, 0.1, 0.1]))]
+    sel = tg           # 두 모드 모두 정답(타겟)만 제출 → 궤적·타이밍 고정, 규모만 축으로 분리
+    events = build_events(kind, drag_objs, ch.get("drop_zone", {}), timing, rng)  # real이면 실제 수초 소요
     if nonce:
-        st, b1 = post(f"/api/captcha/challenges/{cid}/behavior-batches",
-                      {"session_id": sess, "nonce": nonce, "batch_seq": 0, "previous_receipt": None, "events": events[:half]})
-        st, b2 = post(f"/api/captcha/challenges/{cid}/behavior-batches",
-                      {"session_id": sess, "nonce": nonce, "batch_seq": 1, "previous_receipt": b1.get("receipt"), "events": events[half:]})
-        if not (b1.get("accepted") and b2.get("accepted")): return f"batch_reject"
+        prev = None    # ≤32 이벤트/배치 제한 준수 → 30씩 청킹, 영수증 체인
+        for bseq, i in enumerate(range(0, len(events), 30)):
+            st, b = post(f"/api/captcha/challenges/{cid}/behavior-batches",
+                         {"session_id": sess, "nonce": nonce, "batch_seq": bseq,
+                          "previous_receipt": prev, "events": events[i:i + 30]})
+            if not b.get("accepted"): return "batch_reject"
+            prev = b.get("receipt")
     pown = pow_solve(ch["pow"]["seed"], ch["pow"]["bits"]) if ch.get("pow") else None
     dur = max(100, events[-1]["timestamp_ms"] - events[0]["timestamp_ms"])
     st, res = post(f"/api/captcha/challenges/{cid}/verify",
-                   {"selected_object_ids": tg, "session_id": sess, "duration_ms": dur,
+                   {"selected_object_ids": sel, "session_id": sess, "duration_ms": dur,
                     "events": events, "pow_nonce": pown, "participant_id": sess})
-    return "ok" if res.get("success") else ("step_up" if res.get("step_up") else json.dumps(res)[:30])
+    return "ok" if res.get("success") else ("step_up" if res.get("step_up") else json.dumps(res)[:24])
 
 
 def main():
     args = sys.argv[1:]
-    timing = "synthetic"
+    timing = "synthetic"; drag = "one"; only = None
     if "--timing" in args:
         i = args.index("--timing"); timing = args[i + 1]; del args[i:i + 2]
+    if "--drag" in args:   # 상호작용 규모 축: one(1개) | all(전 객체)
+        i = args.index("--drag"); drag = args[i + 1]; del args[i:i + 2]
+    if "--only" in args:   # 특정 프로파일만(통제실험 속도)
+        i = args.index("--only"); only = args[i + 1]; del args[i:i + 2]
     per = int(args[0]) if args else 3
+    profiles = [p for p in PROFILES if only is None or p == only]
     rng = random.Random(12345)
-    print(f"=== 레드팀 봇 수집 | {len(PROFILES)}종 × {per}건 | timing={timing} | 대상 {BASE} ===")
-    for kind in PROFILES:
+    print(f"=== 레드팀 봇 수집 | {len(profiles)}종 × {per}건 | timing={timing} | drag={drag} | 대상 {BASE} ===")
+    for kind in profiles:
         outs = {}
         for i in range(per):
-            r = run_one(kind, i, timing, rng)
+            r = run_one(kind, i, timing, drag, rng)
             outs[r] = outs.get(r, 0) + 1
             if timing != "real": time.sleep(0.3)   # real은 이미 수초 소요
         print(f"  {kind}: {outs}")
