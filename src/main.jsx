@@ -9,15 +9,22 @@ const api = async (url, options = {}) => {
   return body;
 };
 
+// crypto.randomUUID는 secure-context(HTTPS/localhost) 전용이라 평문 HTTP에선 undefined → 캡차가 안 뜬다.
+// getRandomValues는 insecure context에서도 되므로 그것으로 UUIDv4 폴백(암호학적으로 동등, 세션ID 용도 충분).
+const _uuid = () => (crypto.randomUUID
+  ? crypto.randomUUID()
+  : "10000000-1000-4000-8000-100000000000".replace(/[018]/g, (c) =>
+      (c ^ (crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4)))).toString(16)));
+
 const sessionId = () => {
   let value = sessionStorage.getItem("captcha-session");
-  if (!value) { value = crypto.randomUUID(); sessionStorage.setItem("captcha-session", value); }
+  if (!value) { value = _uuid(); sessionStorage.setItem("captcha-session", value); }
   return value;
 };
 
 const reviewerId = () => {
   let value = sessionStorage.getItem("captcha-reviewer");
-  if (!value) { value = `reviewer-${crypto.randomUUID()}`; sessionStorage.setItem("captcha-reviewer", value); }
+  if (!value) { value = `reviewer-${_uuid()}`; sessionStorage.setItem("captcha-reviewer", value); }
   return value;
 };
 
@@ -396,7 +403,7 @@ function AdminApp() {
   };
   const endBoxEdit=()=>{editRef.current=null;};
   const save=async(status)=>{ try { await api(`/api/admin/reviews/${draft.queue_id}`,{method:"PUT",headers:{"Content-Type":"application/json","X-Captcha-Admin-Key":key},body:JSON.stringify({queue_id:draft.queue_id,reviewer:"web",review_status:status,instruction_ko:draft.instruction_ko,difficulty:draft.difficulty||2,expected_target_count:Number(draft.expected_target_count),objects:draft.objects})}); setMessage(`${status} 상태로 저장했습니다.`); refreshCounts(); if(status==="approved"||status==="rejected"){advance();}else if(index<items.length-1)setIndex(index+1); } catch(error){ setMessage(error.message); if(/이미|처리 중/.test(error.message)) advance(); } };
-  const addBox=()=>{const object_key=`manual_${crypto.randomUUID().slice(0,8)}`;setDraft({...draft,objects:[...draft.objects,{object_key,label:"새 객체",x:.35,y:.25,width:.2,height:.35,role:"ambiguous"}]});setSelectedObjectKey(object_key);};
+  const addBox=()=>{const object_key=`manual_${_uuid().slice(0,8)}`;setDraft({...draft,objects:[...draft.objects,{object_key,label:"새 객체",x:.35,y:.25,width:.2,height:.35,role:"ambiguous"}]});setSelectedObjectKey(object_key);};
   if(!items.length)return <main className="admin-login"><div className="brand-mark">C</div><h1>라벨링 콘솔</h1><p>{message}</p><input type="password" value={key} onChange={(e)=>setKey(e.target.value)} placeholder="관리자 키"/><button className="primary" onClick={load}>후보 불러오기</button><a href="/">사용자 화면으로</a></main>;
   const targetCount=draft.objects.filter((obj)=>obj.role==="target").length;
   return <main className="admin-shell"><header className="admin-head"><div><p className="kicker">LABELING CONSOLE</p><h1>객체 관계 검수</h1></div><div><button className="outline" onClick={()=>load("pending")}>승인 대기</button><button className="outline" onClick={()=>load("approved")}>승인 완료</button><button className="outline" onClick={()=>load("rejected")}>제외</button><span>{reviewerName?`${reviewerName} · `:""}승인 {counts.approved} · 제외 {counts.rejected} · {index+1}/{items.length}</span><a href="/">사용자 화면</a></div></header>
