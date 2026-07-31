@@ -78,6 +78,8 @@ class VerifyRequest(BaseModel):
     events: list[BehaviorEvent] = Field(default_factory=list, max_length=600)
     client_signals: dict | None = Field(default=None)
     pow_nonce: str | None = Field(default=None, max_length=64)
+    # 수집 세션용 참여자 코드(?participant=). 없으면 서버가 session_id 로 폴백한다.
+    participant_id: str | None = Field(default=None, max_length=64)
 
 
 class SignupRequest(BaseModel):
@@ -766,7 +768,8 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
                 retry_count=int(challenge["attempt_count"]),
                 presented_at=challenge.get("created_at"),
                 submitted_at=verify_received_at,
-                anonymous_participant_id=payload.session_id,
+                # 코드가 오면 그쪽이 이기고, 없으면 build_predict_payload 가 session_id 로 폴백한다.
+                anonymous_participant_id=payload.participant_id,
             )
             telemetry_reason = predict_reason
         prediction = behavior_ai.score(predict_payload, behavior_id, predict_reason)

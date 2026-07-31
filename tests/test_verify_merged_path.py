@@ -224,3 +224,28 @@ def test_adaptive_pow_uses_the_bits_stored_on_the_challenge(stub, monkeypatch):
     assert _verify(_solve_pow(CHALLENGE_ID, 8)) == {"success": False, "pow_failed": True}
     # 12비트로 풀면 통과한다.
     assert _verify(_solve_pow(CHALLENGE_ID, 12))["success"] is True
+
+
+def test_participant_code_wins_over_session_id(stub):
+    """?participant= 로 온 코드가 세션 대신 참여자 구분이 되어야 한다.
+
+    수집 세션에서 한 사람이 탭을 바꿔가며 장치별 블록을 돌 때, 코드가 없으면
+    탭마다 다른 사람으로 잡힌다. 그래서 코드가 오면 그쪽이 이겨야 한다.
+    반대로 일반 사용자는 코드가 없으므로 session_id 폴백이 유지돼야 한다.
+    """
+    payload = main.VerifyRequest(
+        selected_object_ids=[TARGET], session_id=SESSION_ID, duration_ms=1500,
+        client_signals={}, pow_nonce=_solve_pow(CHALLENGE_ID, 8),
+        participant_id="P07-mouse",
+    )
+    result = main.verify(CHALLENGE_ID, payload, _FakeRequest(), main.settings.site_key)
+
+    assert result["success"] is True
+    assert stub["payload"]["anonymous_participant_id"] == "P07-mouse"
+
+
+def test_missing_participant_code_falls_back_to_session(stub):
+    result = _verify(_solve_pow(CHALLENGE_ID, 8))
+
+    assert result["success"] is True
+    assert stub["payload"]["anonymous_participant_id"] == SESSION_ID

@@ -168,6 +168,15 @@ function CaptchaApp() {
   const embed = embedParams.get("embed") === "1";
   const lectureId = embedParams.get("lecture") || embedParams.get("lecture_id") || null;
   const purpose = embedParams.get("purpose") || (embed ? "lecture" : "signup");
+  // 수집 세션 참여자 코드(?participant=). 세션 내 유지 → 참여자 단위 FRR 산출용.
+  // 없으면 서버가 session_id 로 폴백하므로 일반 사용자는 영향이 없다.
+  const participantId = (() => {
+    const p = embedParams.get("participant");
+    try {
+      if (p) { sessionStorage.setItem("catchap-participant", p); return p; }
+      return sessionStorage.getItem("catchap-participant") || null;
+    } catch (e) { return p || null; }
+  })();
 
   const record = (type, objectId, event) => {
     if (challengeRef.current?.behavior_event_transport === "off") return;
@@ -254,7 +263,7 @@ function CaptchaApp() {
       const result = await api(`/api/captcha/challenges/${challenge.challenge_id}/verify`, { method: "POST",
         headers: { "Content-Type": "application/json", "X-Captcha-Site-Key": siteKey },
         body: JSON.stringify({ selected_object_ids: selected, session_id: sessionId(),
-          duration_ms: Math.max(100, Math.round(performance.now() - startedAt)), client_signals: clientSignals(), pow_nonce: powNonce }) });
+          duration_ms: Math.max(100, Math.round(performance.now() - startedAt)), client_signals: clientSignals(), pow_nonce: powNonce, participant_id: participantId }) });
       setBehaviorDebug(result.behavior_debug || null);
       if (result.success) {
         setToken(result.captcha_token);
