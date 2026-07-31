@@ -67,7 +67,9 @@ function _sha256(bytes) {
 }
 function _lzbits(words) { let n = 0; for (let i = 0; i < words.length; i++) { const x = words[i] >>> 0; if (x === 0) { n += 32; continue; } n += Math.clz32(x); break; } return n; }
 function _powSolve(seed, bits, cap) { const enc = new TextEncoder(); const p = seed + ":"; for (let nonce = 0; nonce < cap; nonce++) { if (_lzbits(_sha256(enc.encode(p + nonce))) >= bits) return String(nonce); } return null; }
-const _powWorkerSrc = `${_rotr.toString()}\n${_sha256.toString()}\n${_lzbits.toString()}\n${_powSolve.toString()}\nself.onmessage=function(e){self.postMessage(_powSolve(e.data.seed,e.data.bits,20000000));};`;
+// 워커 본문의 _powSolve 호출은 "문자열"이라 미니파이 때 함수명과 어긋난다(ReferenceError→워커 throw
+// →메인스레드 fallback으로 떨어져 느려짐+콘솔에러). 대입으로 이름을 워커 스코프에 고정한다(named fn expr).
+const _powWorkerSrc = `${_rotr.toString()}\n${_sha256.toString()}\n${_lzbits.toString()}\nconst _powSolve = ${_powSolve.toString()};\nself.onmessage=function(e){self.postMessage(_powSolve(e.data.seed,e.data.bits,20000000));};`;
 const solvePow = (pow) => new Promise((resolve) => {
   if (!pow || !pow.seed) { resolve(null); return; }
   const { seed, bits } = pow;
@@ -199,7 +201,8 @@ function CaptchaApp() {
       buttons: event?.buttons ?? null,
       is_primary: event?.isPrimary ?? null,
       event_timestamp: event?.timeStamp ?? null,
-      coalesced_count: event?.getCoalescedEvents?.().length ?? null });
+      // React SyntheticEvent는 속성만 복사하고 메서드는 안 넘김 → nativeEvent 경유. 미지원 브라우저는 null.
+      coalesced_count: event?.nativeEvent?.getCoalescedEvents?.().length ?? null });
     scheduleBehaviorFlush();
   };
 
