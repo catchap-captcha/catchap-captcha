@@ -150,6 +150,19 @@ def adapt_events(events: Iterable[Any], width: int, height: int) -> tuple[list[d
                 "x_normalized": x_normalized,
                 "y_normalized": y_normalized,
                 "target_role": None,
+                # PointerEvent 원천 신호. 궤적 밖 특징이라 (x, y, 시각) 만으로는
+                # 갈라지지 않던 분포를 가를 재료다. 미지원 브라우저는 null 이고,
+                # 결측을 봇 신호로 쓰면 그 브라우저 사용자가 통째로 오탐되므로
+                # 여기서는 있는 그대로 넘기고 판단은 모델 쪽에서 한다.
+                "is_trusted": _event_value(event, "is_trusted"),
+                "pointer_type": _event_value(event, "pointer_type"),
+                "pressure": _event_value(event, "pressure"),
+                "pointer_width": _event_value(event, "pointer_width"),
+                "pointer_height": _event_value(event, "pointer_height"),
+                "buttons": _event_value(event, "buttons"),
+                "is_primary": _event_value(event, "is_primary"),
+                "event_timestamp": _event_value(event, "event_timestamp"),
+                "coalesced_count": _event_value(event, "coalesced_count"),
             }
         )
 
