@@ -141,20 +141,42 @@ def _json_bytes(value: Any) -> bytes:
 # 이미지에서 0.0005px 이라 판별에 쓰는 정밀도보다 한참 아래다.
 _COORD_PRECISION = 6
 
+# PointerEvent 원천 신호 중 float 인 것들. 좌표와 같은 이유로 반올림이 필요하다 —
+# 하나라도 빠지면 b04c315 와 똑같이 배치 해시 재검증이 조용히 깨지고, 그러면
+# 모델은 호출조차 되지 않는데 캡차는 정상 통과해서 증상이 안 보인다.
+#
+# 자릿수를 필드마다 다르게 둔 이유:
+#   pressure          0..1 이라 좌표와 같은 정밀도면 충분
+#   pointer_width/height  px 단위(터치 접촉 폭). 소수점 3자리면 넘치게 충분
+#   event_timestamp   페이지 기준 고해상 ms. 마이크로초까지 남기면 타이밍 분석에
+#                     쓸 만하면서 왕복은 안정적이다
+_FLOAT_PRECISION = {
+    "x": _COORD_PRECISION,
+    "y": _COORD_PRECISION,
+    "pressure": _COORD_PRECISION,
+    "pointer_width": 3,
+    "pointer_height": 3,
+    "event_timestamp": 3,
+}
+
 
 def _canonical_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """해시·저장에 쓸 정규형. 좌표를 고정 자릿수로 낮춰 왕복을 안정시킨다.
+    """해시·저장에 쓸 정규형. float 필드를 고정 자릿수로 낮춰 왕복을 안정시킨다.
 
     저장 시점과 검증 시점에 **같은 함수**를 통과시키는 것이 요점이다. 저장 계층이
-    1e-6 미만으로 값을 흔들어도 두 해시가 갈라지지 않는다.
+    자릿수 아래로 값을 흔들어도 두 해시가 갈라지지 않는다.
+
+    null 표현은 건드리지 않는다. 프론트가 미지원 필드를 항상 명시적 null 로 보내고
+    (``event?.X ?? null``) 서버 모델의 기본값도 None 이라, ``model_dump()`` 결과에
+    키가 항상 존재한다. 생략과 null 이 섞이지 않으므로 양쪽 canonical 이 같다.
     """
     canonical: list[dict[str, Any]] = []
     for event in events:
         row = dict(event)
-        for axis in ("x", "y"):
-            value = row.get(axis)
+        for field, digits in _FLOAT_PRECISION.items():
+            value = row.get(field)
             if isinstance(value, (int, float)) and not isinstance(value, bool):
-                row[axis] = round(float(value), _COORD_PRECISION)
+                row[field] = round(float(value), digits)
         canonical.append(row)
     return canonical
 

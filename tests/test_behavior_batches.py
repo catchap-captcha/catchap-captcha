@@ -363,3 +363,69 @@ def test_predict_payload_always_carries_a_participant_id():
         session_id="session-abcdef12", anonymous_participant_id="P07", **common
     )
     assert payload["anonymous_participant_id"] == "P07"
+
+
+def test_pointer_signal_floats_survive_a_storage_round_trip():
+    """PointerEvent 원천 신호의 float 도 왕복에서 살아남아야 한다.
+
+    b04c315 와 똑같은 함정이다. 좌표만 반올림하고 pressure·event_timestamp 를
+    빠뜨리면, 저장 계층이 마지막 자리를 흔드는 순간 배치 해시 재검증이 깨진다.
+    그러면 verify 가 배치를 통째로 버리고 모델은 호출조차 안 되는데, 캡차는
+    fail-open 이라 정상 통과해서 증상이 전혀 안 보인다. 수집만 조용히 0 이 된다.
+    """
+    import json
+
+    from app.db import _FLOAT_PRECISION, _canonical_events, _payload_hash
+
+    events = [{
+        "seq": 0, "type": "pointer_move", "object_id": "tmp_a",
+        "x": 0.20 + (0.845 - 0.20) * (1 / 7), "y": 0.30000000000000004,
+        "timestamp_ms": 1_700_000_000_000,
+        "is_trusted": True, "pointer_type": "mouse",
+        "pressure": 0.5000000000000001,
+        "pointer_width": 23.456789012345,
+        "pointer_height": 1.0000000000000002,
+        "buttons": 1, "is_primary": True,
+        "event_timestamp": 12345.678901234,
+        "coalesced_count": 7,
+    }]
+
+    ingest = _payload_hash(events)
+    drifted = json.loads(json.dumps(_canonical_events(events)))
+    for row in drifted:
+        for field in _FLOAT_PRECISION:
+            if isinstance(row.get(field), float):
+                row[field] += 1e-12
+
+    assert _payload_hash(drifted) == ingest, "왕복 후 배치 해시가 달라졌다"
+
+
+def test_every_float_wire_field_is_canonicalised():
+    """새 float 필드를 스키마에만 추가하고 정규화에서 빠뜨리는 것을 막는다.
+
+    이게 이 버그의 실제 발생 경로다 — 필드를 늘릴 때 스키마는 고치고 해시 쪽은
+    잊는다. 모델 정의에서 float 필드를 뽑아 대조한다.
+    """
+    from app.db import _FLOAT_PRECISION
+    from app.main import BehaviorBatchEvent
+
+    float_fields = {
+        name for name, info in BehaviorBatchEvent.model_fields.items()
+        if "float" in str(info.annotation)
+    }
+    missing = float_fields - set(_FLOAT_PRECISION)
+    assert not missing, f"정규화에서 빠진 float 필드: {missing}"
+
+
+def test_null_pointer_signals_do_not_break_canonicalisation():
+    """미지원 브라우저는 전부 null 을 보낸다. 그래도 해시가 안정적이어야 한다."""
+    from app.db import _payload_hash
+
+    events = [{
+        "seq": 0, "type": "pointer_move", "object_id": "tmp_a",
+        "x": 0.25, "y": 0.5, "timestamp_ms": 1_700_000_000_000,
+        "is_trusted": None, "pointer_type": None, "pressure": None,
+        "pointer_width": None, "pointer_height": None, "buttons": None,
+        "is_primary": None, "event_timestamp": None, "coalesced_count": None,
+    }]
+    assert _payload_hash(events) == _payload_hash([dict(events[0])])

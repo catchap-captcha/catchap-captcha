@@ -188,7 +188,18 @@ function CaptchaApp() {
     pendingEventsRef.current.push({ seq: nextEventSeqRef.current++, type, object_id: objectId || null,
       x: rect && event ? Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)) : null,
       y: rect && event ? Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)) : null,
-      timestamp_ms: now });
+      timestamp_ms: now,
+      // PointerEvent 원천 신호(궤적 밖 특징). 미지원/이벤트 없으면 null — 실패가 아니다.
+      // isTrusted=합성 이벤트 판별, coalesced_count=실브라우저 없이 못 만드는 값.
+      is_trusted: event?.isTrusted ?? null,
+      pointer_type: event?.pointerType ?? null,
+      pressure: event?.pressure ?? null,
+      pointer_width: event?.width ?? null,
+      pointer_height: event?.height ?? null,
+      buttons: event?.buttons ?? null,
+      is_primary: event?.isPrimary ?? null,
+      event_timestamp: event?.timeStamp ?? null,
+      coalesced_count: event?.getCoalescedEvents?.().length ?? null });
     scheduleBehaviorFlush();
   };
 

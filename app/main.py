@@ -57,6 +57,17 @@ class BehaviorEvent(BaseModel):
     x: float | None = Field(default=None, ge=0, le=1)
     y: float | None = Field(default=None, ge=0, le=1)
     timestamp_ms: int = Field(ge=0)
+    # sw 요청: PointerEvent 원천 신호(궤적 밖 특징). 전부 Optional·느슨 검증 → 미지원 시 null이지 거부 아님.
+    # isTrusted=JS 합성이벤트 판별, coalesced_count=실브라우저 없이 못 만드는 값, pressure/geometry=입력장치 특성.
+    is_trusted: bool | None = None
+    pointer_type: str | None = Field(default=None, max_length=16)
+    pressure: float | None = None
+    pointer_width: float | None = None
+    pointer_height: float | None = None
+    buttons: int | None = None
+    is_primary: bool | None = None
+    event_timestamp: float | None = None
+    coalesced_count: int | None = None
 
 
 class BehaviorBatchEvent(BehaviorEvent):
