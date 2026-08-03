@@ -1,0 +1,29 @@
+# 서비스를 돌리는 데만 필요한 것 — 컨테이너 이미지가 이 파일을 쓴다.
+#
+# ★requirements.txt 와 나눈 이유
+#   requirements.txt 는 개발 전체(문항 생성·라벨링 도구 포함)를 위한 목록이라
+#   ultralytics(YOLO)·opencv·numpy·pandas 가 들어 있다. 그런데 **서비스(app/)는
+#   이 넷을 하나도 import 하지 않는다**(2026-08-03 app/*.py 전수 확인).
+#   전부 scripts/ 전용이다.
+#
+#   같이 담으면 5.6GB, 빼면 수백 MB다. 파드를 2벌 띄우고 노드에 내려받는 것을
+#   생각하면 차이가 크다.
+#
+# ★app/ 이 실제로 import 하는 외부 패키지는 넷뿐이다:
+#     fastapi · pydantic · pymysql · PIL(Pillow)
+#   나머지는 그것들이 돌아가는 데 필요한 것이다.
+#
+# ★버전 범위는 requirements.txt 와 똑같이 맞췄다. 여기서만 바꾸면 개발과
+#   운영이 다른 버전으로 돌아 재현이 안 된다.
+
+fastapi>=0.115,<1
+uvicorn[standard]>=0.30,<1
+Pillow>=10.4,<13
+PyMySQL>=1.1,<2
+pydantic[email]>=2.8,<3
+
+# FastAPI 가 폼·파일 업로드를 받을 때 필요(직접 import 하지 않아도 런타임 의존).
+python-multipart>=0.0.9,<1
+
+# 응답 직렬화 가속 — 있으면 쓰고 없으면 표준 json 으로 떨어진다. 가벼워서 담는다.
+orjson>=3.10,<4
