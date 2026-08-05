@@ -304,7 +304,7 @@ function CaptchaApp() {
         setMessage("인증되었습니다.");
         if (embed && window.parent !== window) {
           const target = safeTargetOrigin();  // 허용목록 검증 실패 시 토큰 미전송(탈취 차단)
-          if (target) window.parent.postMessage({ type: "catchap-verified", token: result.captcha_token, lecture_id: lectureId }, target);
+          if (target) window.parent.postMessage({ type: "catchap-verified", token: result.captcha_token, lecture_id: lectureId, session_id: sessionId(), purpose }, target);
         }
         return;
       }
