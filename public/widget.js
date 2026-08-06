@@ -10,7 +10,8 @@
  *     };
  *   </script>
  *   <script src="https://<캡챠호스트>/widget.js"
- *           data-target="#catchap" data-lecture-id="LEC-2026-01"></script>
+ *           data-target="#catchap" data-lecture-id="LEC-2026-01"
+ *           data-participant="사용자코드"></script>   <!-- data-participant: 수집 참여자 코드(선택) -->
  */
 (function () {
   var script = document.currentScript;
@@ -20,6 +21,7 @@
   // iframe을 같은 베이스경로에서 로드한다(https 플랫폼의 mixed-content 회피용 동일도메인 프록시).
   var base = script.src.replace(/\/widget\.js(\?.*)?$/, "");
   var lecture = script.getAttribute("data-lecture-id") || "";
+  var participant = script.getAttribute("data-participant") || "";  // 수집 참여자 코드(선택)
 
   var target = script.getAttribute("data-target");
   var container = target ? document.querySelector(target) : null;
@@ -28,7 +30,9 @@
     script.parentNode.insertBefore(container, script);
   }
 
-  var params = new URLSearchParams({ embed: "1", lecture: lecture });
+  var q = { embed: "1", lecture: lecture };
+  if (participant) q.participant = participant;   // 위젯 경로에서도 participant를 iframe까지 전달
+  var params = new URLSearchParams(q);
   var iframe = document.createElement("iframe");
   iframe.src = base + "/?" + params.toString();
   iframe.title = "CatChap 인증";
