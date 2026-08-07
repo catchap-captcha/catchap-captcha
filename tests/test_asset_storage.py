@@ -122,3 +122,62 @@ def test_이상한_백엔드_이름도_터진다(monkeypatch: pytest.MonkeyPatch
         module.get_asset_storage()
     assert "local|object" in str(e.value)
     module.reset_asset_storage_cache()
+
+
+# ── 기동 시험 ────────────────────────────────────────────────────────────
+# ★2026-08-07 실제로 터진 것을 잡는 시험.
+#   `from . import asset_storage as assets` 로 넣었는데 main.py 1135줄에
+#   `assets = settings.static_dir/"assets"` 가 있어 ★모듈이 Path 로 덮였다.
+#   파드가 기동에서 죽었다 — AttributeError: 'PosixPath' has no attribute 'get_asset_storage'.
+#
+#   ★기존 시험 53개가 이걸 못 잡았다. lifespan 을 안 거치고,
+#     덮어쓰는 줄이 정적 파일 마운트 코드라 시험에서 실행되지 않았다.
+#     그래서 ★"앱을 실제로 띄워 보는" 시험을 둔다.
+
+def test_앱이_실제로_기동한다(tmp_path, monkeypatch):
+    """★TestClient 로 lifespan 까지 돌린다. 이름이 겹치면 여기서 터진다."""
+    monkeypatch.setenv("ASSET_STORAGE_BACKEND", "local")
+    monkeypatch.setenv("FINAL_DIR", str(tmp_path / "final"))
+    monkeypatch.setenv("LABELING_DIR", str(tmp_path / "labeling"))
+    monkeypatch.setenv("RUNTIME_DIR", str(tmp_path / "runtime"))
+    # ★★static_dir 이 ★실제로 있어야 한다.
+    #   main.py 끝에 `if settings.static_dir.exists():` 안에서
+    #   `assets = settings.static_dir/"assets"` 로 모듈 수준 이름을 덮는 코드가 있다.
+    #   그 폴더가 없으면 그 줄이 아예 안 돌아 ★고장을 지나쳐 버린다(2026-08-07 실측).
+    static = tmp_path / "static"
+    (static / "assets").mkdir(parents=True)
+    (static / "index.html").write_text("<html></html>", encoding="utf-8")
+    monkeypatch.setenv("STATIC_DIR", str(static))
+
+    import importlib
+    from fastapi.testclient import TestClient
+
+    from app import config as config_module
+    importlib.reload(config_module)
+    from app import asset_storage as storage_module
+    importlib.reload(storage_module)
+    storage_module.reset_asset_storage_cache()
+    from app import main as main_module
+    importlib.reload(main_module)
+
+    # ★DB 는 이 시험의 대상이 아니다. CI 에 MySQL 이 없으므로 초기화만 막는다.
+    #   막는 것은 DB 하나뿐이고, 자산 저장소 확인은 그대로 돈다.
+    monkeypatch.setattr(main_module.database, "initialize", lambda *a, **k: None)
+
+    # ★lifespan 이 여기서 돈다 — 자산 저장소 설정 확인도 그 안에서 한다.
+    with TestClient(main_module.app) as client:
+        assert client.get("/healthz").status_code in (200, 404)
+
+    storage_module.reset_asset_storage_cache()
+
+
+def test_asset_storage_모듈이_다른_이름에_덮이지_않는다():
+    """★main.py 안에서 asset_storage 모듈을 가리키는 이름이 살아 있는지 본다."""
+    import types
+
+    from app import main as main_module
+
+    assert isinstance(main_module.asset_store, types.ModuleType), (
+        "asset_store 가 모듈이 아니다 — 같은 이름의 변수가 덮어썼을 수 있다"
+    )
+    assert hasattr(main_module.asset_store, "get_asset_storage")

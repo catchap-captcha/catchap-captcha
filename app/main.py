@@ -28,7 +28,7 @@ from .behavior_client import (
     build_predict_payload,
     resolve_final_verdict,
 )
-from . import asset_storage as assets
+from . import asset_storage as asset_store
 from .config import settings
 from .db import Database, utcnow
 
@@ -549,7 +549,7 @@ def candidate_state(row: dict, decisions: dict, active_ids: set) -> str | None:
 
 def append_final_manifest(question: dict, objects: list[dict]) -> None:
     # ★파일 경로가 아니라 자산 저장소를 거친다 — 로컬이면 예전과 같은 파일에 쓴다.
-    raw = assets.read_text(MANIFEST_KEY)
+    raw = asset_store.read_text(MANIFEST_KEY)
     existing: dict[str, dict] = {}
     if raw:
         for line in raw.splitlines():
@@ -565,7 +565,7 @@ def append_final_manifest(question: dict, objects: list[dict]) -> None:
                      "bbox": [row["x"], row["y"], row["width"], row["height"]],
                      "role": row["role"], "piece_path": row.get("piece_path")} for row in objects],
     }
-    assets.write_text(MANIFEST_KEY, "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in existing.values()))
+    asset_store.write_text(MANIFEST_KEY, "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in existing.values()))
 
 
 @asynccontextmanager
@@ -578,7 +578,7 @@ async def lifespan(_: FastAPI):
     for path in paths:
         path.mkdir(parents=True, exist_ok=True)
     # ★설정이 틀렸으면 기동할 때 바로 터뜨린다. 첫 요청까지 미루면 원인이 멀어진다.
-    assets.get_asset_storage()
+    asset_store.get_asset_storage()
     database.initialize()
     # ① Origin 검증은 ALLOWED_ORIGINS가 실도메인일 때만 발동. 기본값 '*'면 조용히 무력화되므로
     # 실서비스에서 놓치지 않도록 시작 시 경고를 남긴다(설정은 배포 .env에서).
@@ -717,11 +717,11 @@ def challenge_asset(challenge_id: str, asset_id: str):
     if not challenge: raise HTTPException(404, "Challenge not found")
     question = database.get_question(challenge["question_id"])
     if question is None: raise HTTPException(404, "Question not found")
-    if asset_id == "image": return assets.asset_response(question["image_path"])
+    if asset_id == "image": return asset_store.asset_response(question["image_path"])
     mapping = next((m for m in challenge["objects"] if m["temporary_object_id"] == asset_id), None)
     if not mapping: raise HTTPException(404, "Asset not found")
     if not mapping.get("piece_path"): raise HTTPException(404, "Piece not found")
-    return assets.asset_response(mapping["piece_path"])
+    return asset_store.asset_response(mapping["piece_path"])
 
 
 @app.post("/api/captcha/challenges/{challenge_id}/behavior-batches")
@@ -1091,7 +1091,7 @@ def save_review(queue_id: str, payload: ReviewRequest, x_captcha_admin_key: str 
         question_id=f"tq_{item['question_id']}"; image_source=settings.labeling_dir/item["image_path"]
         # ★자산은 저장소를 거친다(로컬이면 예전과 같은 파일에 쓴다).
         image_key=f"images/{question_id}{image_source.suffix.lower()}"
-        image_bytes=image_source.read_bytes(); assets.write_bytes(image_key,image_bytes)
+        image_bytes=image_source.read_bytes(); asset_store.write_bytes(image_key,image_bytes)
         from PIL import Image
         with Image.open(io.BytesIO(image_bytes)) as image: width,height=image.size
         object_rows=[];prepared={str(row.get("object_key")):row for row in item.get("objects",[])}
@@ -1104,7 +1104,7 @@ def save_review(queue_id: str, payload: ReviewRequest, x_captcha_admin_key: str 
                 if prepared_source and prepared_source.is_file():
                     unchanged=all(abs(float(getattr(obj,name))-float(original.get(name,0)))<1e-6 for name in ("x","y","width","height"))
                     if unchanged:
-                        assets.write_bytes(piece_rel,prepared_source.read_bytes())
+                        asset_store.write_bytes(piece_rel,prepared_source.read_bytes())
                     else:
                         new_box=(round(obj.x*width),round(obj.y*height),round((obj.x+obj.width)*width),round((obj.y+obj.height)*height))
                         old_box=(round(float(original["x"])*width),round(float(original["y"])*height),round((float(original["x"])+float(original["width"]))*width),round((float(original["y"])+float(original["height"]))*height))
@@ -1113,11 +1113,11 @@ def save_review(queue_id: str, payload: ReviewRequest, x_captcha_admin_key: str 
                             masked=source_piece.convert("RGBA")
                             if masked.size!=old_size: masked=masked.resize(old_size,Image.Resampling.LANCZOS)
                             adjusted=Image.new("RGBA",new_size,(0,0,0,0));adjusted.alpha_composite(masked,(old_box[0]-new_box[0],old_box[1]-new_box[1]))
-                            buf=io.BytesIO();adjusted.save(buf,"PNG",optimize=True);assets.write_bytes(piece_rel,buf.getvalue())
+                            buf=io.BytesIO();adjusted.save(buf,"PNG",optimize=True);asset_store.write_bytes(piece_rel,buf.getvalue())
                 else:
                     with Image.open(io.BytesIO(image_bytes)) as image:
                         box=(round(obj.x*width),round(obj.y*height),round((obj.x+obj.width)*width),round((obj.y+obj.height)*height))
-                        buf=io.BytesIO();image.crop(box).convert("RGBA").save(buf,"PNG",optimize=True);assets.write_bytes(piece_rel,buf.getvalue())
+                        buf=io.BytesIO();image.crop(box).convert("RGBA").save(buf,"PNG",optimize=True);asset_store.write_bytes(piece_rel,buf.getvalue())
             object_rows.append({**obj.model_dump(),"piece_path":piece_rel})
         question={"id":question_id,"type":"object_drag","instruction_ko":payload.instruction_ko,
             "instruction_en":item.get("question_en"),"source":"tallyqa_visual_genome",
