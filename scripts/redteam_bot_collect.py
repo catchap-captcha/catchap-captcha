@@ -42,6 +42,7 @@ from app.config import settings
 from app.db import Database
 
 BASE = os.environ.get("CAPTCHA_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
+NOPOW = "--nopow" in sys.argv  # 서버 PoW 게이트 실측용: pow_nonce=null로 제출
 SK = settings.site_key
 db = Database(settings)
 PROFILES = ["teleport", "straight_uniform", "robotic_regular", "jitter_fast", "smart_curve"]
@@ -155,7 +156,7 @@ def run_one(kind, n, timing, drag, rng):
                           "previous_receipt": prev, "events": events[i:i + 30]})
             if not b.get("accepted"): return "batch_reject"
             prev = b.get("receipt")
-    pown = pow_solve(ch["pow"]["seed"], ch["pow"]["bits"]) if ch.get("pow") else None
+    pown = None if NOPOW else (pow_solve(ch["pow"]["seed"], ch["pow"]["bits"]) if ch.get("pow") else None)
     dur = max(100, events[-1]["timestamp_ms"] - events[0]["timestamp_ms"])
     st, res = post(f"/api/captcha/challenges/{cid}/verify",
                    {"selected_object_ids": sel, "session_id": sess, "duration_ms": dur,
@@ -172,6 +173,8 @@ def main():
         i = args.index("--drag"); drag = args[i + 1]; del args[i:i + 2]
     if "--only" in args:   # 특정 프로파일만(통제실험 속도)
         i = args.index("--only"); only = args[i + 1]; del args[i:i + 2]
+    if "--nopow" in args:  # 서버 PoW 게이트 실측(전역 NOPOW로 이미 잡힘)
+        args.remove("--nopow")
     per = int(args[0]) if args else 3
     profiles = [p for p in PROFILES if only is None or p == only]
     rng = random.Random(12345)
