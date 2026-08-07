@@ -659,6 +659,23 @@ def public_config():
     return {"siteKey": settings.site_key, "embedOrigins": list(settings.embed_origins)}
 
 
+def _step_up_tier(session_challenges: int):
+    """step-up 계층(gated). 세션 재도전 누적(=의심 신호)으로 계층을 정해 다음 챌린지를 어렵게 한다.
+    반환 (min객체,max객체,PoW비트,허니팟수) 또는 None(비활성=현행 유지).
+    ⚠️ AI 채점이 드래그 단위로 바뀐 뒤 켤 것 — 아니면 규모 큰 세션이 오히려 사람으로 판정됨(sw)."""
+    if not settings.step_up_enabled:
+        return None
+    tiers = []
+    for part in settings.step_up_tiers.split(";"):
+        a = part.split(",")
+        if len(a) == 4:
+            tiers.append(tuple(int(x) for x in a))
+    if not tiers:
+        return None
+    idx = 2 if session_challenges >= settings.step_up_tier3_at else (1 if session_challenges >= settings.step_up_tier2_at else 0)
+    return tiers[min(idx, len(tiers) - 1)]
+
+
 @app.post("/api/captcha/challenges", status_code=status.HTTP_201_CREATED)
 def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_key: str | None = Header(None)):
     require_header(x_captcha_site_key, settings.site_key, "Invalid site key"); check_origin(request)
@@ -667,15 +684,19 @@ def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_
         raise HTTPException(429,"Too many CAPTCHA requests")
     if pattern["session_telemetry_failures_10m"]>=settings.max_telemetry_failures_10m:
         raise HTTPException(429,"Too many invalid behavior attempts")
-    question = database.active_question()
+    tier = _step_up_tier(pattern["session_challenges_10m"])  # None이면 현행(단일 난이도)
+    question = (database.active_question(tier[0], tier[1]) or database.active_question()) if tier else database.active_question()
     if not question: raise HTTPException(503, "No approved CAPTCHA questions")
     challenge_id = str(uuid.uuid4()); now = utcnow(); expires = now + timedelta(seconds=settings.challenge_ttl_seconds)
     behavior_nonce = secrets.token_urlsafe(24)
-    # 적응형 PoW: 최근 실패/과다요청 세션엔 난이도 상향 → 봇 재시도 비용 계단식 상승.
-    pow_bits = settings.pow_difficulty_bits
-    if settings.pow_enabled and (pattern["session_failures_10m"] >= settings.pow_stepup_failures
-                                 or pattern["session_challenges_10m"] >= settings.pow_stepup_challenges):
-        pow_bits += settings.pow_stepup_bits
+    # PoW 난이도: step-up 계층이면 계층 비트, 아니면 적응형(최근 실패/과다요청 세션 상향).
+    if tier:
+        pow_bits = tier[2]
+    else:
+        pow_bits = settings.pow_difficulty_bits
+        if settings.pow_enabled and (pattern["session_failures_10m"] >= settings.pow_stepup_failures
+                                     or pattern["session_challenges_10m"] >= settings.pow_stepup_challenges):
+            pow_bits += settings.pow_stepup_bits
     rng = secrets.SystemRandom()
     mappings = [(obj["id"], f"tmp_{secrets.token_urlsafe(8)}") for obj in question["objects"] if obj["role"] != "invalid"]
     temporary = {object_id: temp for object_id, temp in mappings}
@@ -685,7 +706,8 @@ def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_
     # ② 허니팟: 빈 영역에 투명 함정 히트영역 추가. 사람은 안 건드리고 열거 봇만 집음 → 제출 시 봇 확정.
     honeypot_ids = []
     boxes = [(float(o["bbox_x"]),float(o["bbox_y"]),float(o["bbox_width"]),float(o["bbox_height"])) for o in question["objects"]]
-    for _ in range(settings.honeypot_count):
+    honeypot_n = tier[3] if tier else settings.honeypot_count  # step-up 계층이면 계층 허니팟 수
+    for _ in range(honeypot_n):
         hp = _place_honeypot(boxes, rng)
         if not hp: continue
         tid = f"tmp_{secrets.token_urlsafe(8)}"; honeypot_ids.append(tid); boxes.append(hp)

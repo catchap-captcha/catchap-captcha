@@ -69,6 +69,15 @@ class Settings:
     pow_stepup_challenges: int = int(os.getenv("POW_STEPUP_CHALLENGES", "5"))
     # 허니팟: 빈 영역에 심는 투명 함정 히트영역 수(사람은 안 건드림, 열거 봇만 집음).
     honeypot_count: int = int(os.getenv("HONEYPOT_COUNT", "1"))
+    # step-up 계층(sw 요청): 의심 세션에 다음 챌린지를 어렵게(객체 수·PoW 비트·허니팟 상향).
+    # ⚠️ 기본 OFF — AI 채점이 드래그 단위로 바뀌기 전 켜면 '규모 클수록 사람 판정'이라 제일 의심스러운
+    #    세션에 제일 관대해짐(sw 지적). per-drag 채점(sw 4094fbf)과 함께 켠다.
+    step_up_enabled: bool = os.getenv("STEP_UP_ENABLED", "0") == "1"
+    # 계층별 "min객체,max객체,PoW비트,허니팟수" 세미콜론 구분(1→3단계). 실객체(invalid 제외) 기준.
+    step_up_tiers: str = os.getenv("STEP_UP_TIERS", "2,3,17,1;4,5,19,2;6,8,21,2")
+    # 세션 누적 챌린지(=재도전=의심 신호) 임계로 승급. 1st→1단계, tier2_at→2단계, tier3_at→3단계.
+    step_up_tier2_at: int = int(os.getenv("STEP_UP_TIER2_AT", "1"))
+    step_up_tier3_at: int = int(os.getenv("STEP_UP_TIER3_AT", "2"))
     # The behavior model runs as a separate internal service. Browser clients
     # never receive this key and cannot call the model directly.
     behavior_ai_url: str = os.getenv("BEHAVIOR_AI_URL", "")
