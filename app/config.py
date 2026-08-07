@@ -87,6 +87,18 @@ class Settings:
     behavior_promote_min_passed: int = int(os.getenv("BEHAVIOR_PROMOTE_MIN_PASSED", "500"))
     behavior_promote_max_fp_rate: float = float(os.getenv("BEHAVIOR_PROMOTE_MAX_FP_RATE", "0.02"))
     final_dir: Path = path_setting("FINAL_DIR", "data/final")
+    # ★문항 자산(이미지·조각·매니페스트)을 어디에 두는가 — app/asset_storage.py 참고.
+    #   local  : 지금까지와 같은 로컬 디스크(final_dir). 개발·시험의 기본값.
+    #   object : 오브젝트 스토리지. 운영에서 쓴다 — 이미지에 367MB 를 굽지 않기 위해서다.
+    #   ★백엔드의 MEDIA_* 와 같은 모양으로 맞췄다(다른 방식을 새로 만들지 않는다).
+    asset_storage_backend: Literal["local", "object"] = os.getenv("ASSET_STORAGE_BACKEND", "local")  # type: ignore[assignment]
+    asset_bucket: str = os.getenv("ASSET_BUCKET", "")
+    # 버킷 안 최상위 접두사. ★백엔드 미디어(media/)와 겹치지 않게 따로 둔다.
+    asset_key_prefix: str = os.getenv("ASSET_KEY_PREFIX", "captcha-service/final")
+    asset_s3_endpoint: str = os.getenv("ASSET_S3_ENDPOINT", "https://objectstorage.kr-central-2.kakaocloud.com")
+    asset_s3_region: str = os.getenv("ASSET_S3_REGION", "kr-central-2")
+    asset_s3_access_key: str = os.getenv("ASSET_S3_ACCESS_KEY", "")
+    asset_s3_secret_key: str = os.getenv("ASSET_S3_SECRET_KEY", "")
     labeling_dir: Path = path_setting("LABELING_DIR", "data/labeling")
     runtime_dir: Path = path_setting("RUNTIME_DIR", "data/runtime")
     static_dir: Path = path_setting("STATIC_DIR", "static/dist")

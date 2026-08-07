@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import hmac
 import json
 import math
 import os
 import secrets
-import shutil
 import time
 import uuid
 from collections import deque
@@ -28,6 +28,7 @@ from .behavior_client import (
     build_predict_payload,
     resolve_final_verdict,
 )
+from . import asset_storage as assets
 from .config import settings
 from .db import Database, utcnow
 
@@ -213,7 +214,13 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+MANIFEST_KEY = "challenges.jsonl"
+
+
 def safe_asset(root: Path, relative: str) -> Path:
+    """★로컬 파일 전용 안전 검사. 자산은 asset_storage 를 거치므로 여기서 쓰지 않는다.
+
+    labeling_dir 처럼 **로컬에만 있는** 작업용 폴더를 다룰 때를 위해 남겨 둔다."""
     candidate = (root / relative).resolve()
     if root.resolve() not in candidate.parents or not candidate.is_file():
         raise HTTPException(404, "Asset not found")
@@ -541,10 +548,11 @@ def candidate_state(row: dict, decisions: dict, active_ids: set) -> str | None:
 
 
 def append_final_manifest(question: dict, objects: list[dict]) -> None:
-    manifest = settings.final_dir / "challenges.jsonl"
+    # ★파일 경로가 아니라 자산 저장소를 거친다 — 로컬이면 예전과 같은 파일에 쓴다.
+    raw = assets.read_text(MANIFEST_KEY)
     existing: dict[str, dict] = {}
-    if manifest.exists():
-        for line in manifest.read_text(encoding="utf-8").splitlines():
+    if raw:
+        for line in raw.splitlines():
             if line.strip():
                 row = json.loads(line)
                 existing[row["challenge_id"]] = row
@@ -557,14 +565,20 @@ def append_final_manifest(question: dict, objects: list[dict]) -> None:
                      "bbox": [row["x"], row["y"], row["width"], row["height"]],
                      "role": row["role"], "piece_path": row.get("piece_path")} for row in objects],
     }
-    manifest.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in existing.values()), encoding="utf-8")
+    assets.write_text(MANIFEST_KEY, "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in existing.values()))
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    for path in [settings.final_dir / "images", settings.final_dir / "pieces", settings.labeling_dir,
-                 settings.runtime_dir / "attempts", settings.runtime_dir / "behavior-events", settings.runtime_dir / "logs"]:
+    # ★자산 폴더는 로컬 백엔드일 때만 만든다. object 면 버킷에 있으므로 만들 폴더가 없다.
+    paths = [settings.labeling_dir, settings.runtime_dir / "attempts",
+             settings.runtime_dir / "behavior-events", settings.runtime_dir / "logs"]
+    if settings.asset_storage_backend == "local":
+        paths = [settings.final_dir / "images", settings.final_dir / "pieces"] + paths
+    for path in paths:
         path.mkdir(parents=True, exist_ok=True)
+    # ★설정이 틀렸으면 기동할 때 바로 터뜨린다. 첫 요청까지 미루면 원인이 멀어진다.
+    assets.get_asset_storage()
     database.initialize()
     # ① Origin 검증은 ALLOWED_ORIGINS가 실도메인일 때만 발동. 기본값 '*'면 조용히 무력화되므로
     # 실서비스에서 놓치지 않도록 시작 시 경고를 남긴다(설정은 배포 .env에서).
@@ -703,11 +717,11 @@ def challenge_asset(challenge_id: str, asset_id: str):
     if not challenge: raise HTTPException(404, "Challenge not found")
     question = database.get_question(challenge["question_id"])
     if question is None: raise HTTPException(404, "Question not found")
-    if asset_id == "image": return FileResponse(safe_asset(settings.final_dir, question["image_path"]))
+    if asset_id == "image": return assets.asset_response(question["image_path"])
     mapping = next((m for m in challenge["objects"] if m["temporary_object_id"] == asset_id), None)
     if not mapping: raise HTTPException(404, "Asset not found")
     if not mapping.get("piece_path"): raise HTTPException(404, "Piece not found")
-    return FileResponse(safe_asset(settings.final_dir, mapping["piece_path"]))
+    return assets.asset_response(mapping["piece_path"])
 
 
 @app.post("/api/captcha/challenges/{challenge_id}/behavior-batches")
@@ -1075,21 +1089,22 @@ def save_review(queue_id: str, payload: ReviewRequest, x_captcha_admin_key: str 
             append_final_manifest(question,object_rows)
             return {"saved":True,"status":payload.review_status}
         question_id=f"tq_{item['question_id']}"; image_source=settings.labeling_dir/item["image_path"]
-        final_image=settings.final_dir/"images"/f"{question_id}{image_source.suffix.lower()}"; final_image.parent.mkdir(parents=True,exist_ok=True)
-        final_image.write_bytes(image_source.read_bytes())
+        # ★자산은 저장소를 거친다(로컬이면 예전과 같은 파일에 쓴다).
+        image_key=f"images/{question_id}{image_source.suffix.lower()}"
+        image_bytes=image_source.read_bytes(); assets.write_bytes(image_key,image_bytes)
         from PIL import Image
-        with Image.open(final_image) as image: width,height=image.size
+        with Image.open(io.BytesIO(image_bytes)) as image: width,height=image.size
         object_rows=[];prepared={str(row.get("object_key")):row for row in item.get("objects",[])}
         for obj in payload.objects:
             piece_rel=None
             if obj.role in {"target","decoy"}:
-                piece_rel=f"pieces/{question_id}-{obj.object_key}.png"; piece=settings.final_dir/piece_rel
+                piece_rel=f"pieces/{question_id}-{obj.object_key}.png"
                 original=prepared.get(str(obj.object_key));prepared_path=original.get("prepared_piece_path") if original else None
                 prepared_source=settings.labeling_dir/prepared_path if prepared_path else None
                 if prepared_source and prepared_source.is_file():
                     unchanged=all(abs(float(getattr(obj,name))-float(original.get(name,0)))<1e-6 for name in ("x","y","width","height"))
                     if unchanged:
-                        shutil.copy2(prepared_source,piece)
+                        assets.write_bytes(piece_rel,prepared_source.read_bytes())
                     else:
                         new_box=(round(obj.x*width),round(obj.y*height),round((obj.x+obj.width)*width),round((obj.y+obj.height)*height))
                         old_box=(round(float(original["x"])*width),round(float(original["y"])*height),round((float(original["x"])+float(original["width"]))*width),round((float(original["y"])+float(original["height"]))*height))
@@ -1097,15 +1112,16 @@ def save_review(queue_id: str, payload: ReviewRequest, x_captcha_admin_key: str 
                         with Image.open(prepared_source) as source_piece:
                             masked=source_piece.convert("RGBA")
                             if masked.size!=old_size: masked=masked.resize(old_size,Image.Resampling.LANCZOS)
-                            adjusted=Image.new("RGBA",new_size,(0,0,0,0));adjusted.alpha_composite(masked,(old_box[0]-new_box[0],old_box[1]-new_box[1]));adjusted.save(piece,"PNG",optimize=True)
+                            adjusted=Image.new("RGBA",new_size,(0,0,0,0));adjusted.alpha_composite(masked,(old_box[0]-new_box[0],old_box[1]-new_box[1]))
+                            buf=io.BytesIO();adjusted.save(buf,"PNG",optimize=True);assets.write_bytes(piece_rel,buf.getvalue())
                 else:
-                    with Image.open(final_image) as image:
+                    with Image.open(io.BytesIO(image_bytes)) as image:
                         box=(round(obj.x*width),round(obj.y*height),round((obj.x+obj.width)*width),round((obj.y+obj.height)*height))
-                        image.crop(box).convert("RGBA").save(piece,"PNG",optimize=True)
+                        buf=io.BytesIO();image.crop(box).convert("RGBA").save(buf,"PNG",optimize=True);assets.write_bytes(piece_rel,buf.getvalue())
             object_rows.append({**obj.model_dump(),"piece_path":piece_rel})
         question={"id":question_id,"type":"object_drag","instruction_ko":payload.instruction_ko,
             "instruction_en":item.get("question_en"),"source":"tallyqa_visual_genome",
-            "source_question_id":str(item["question_id"]),"image_path":str(final_image.relative_to(settings.final_dir)),
+            "source_question_id":str(item["question_id"]),"image_path":image_key,
             "image_width":width,"image_height":height,"difficulty":payload.difficulty,"status":"active",
             "review_status":"approved","reviewer":reviewer,"reviewed_at":now,"created_at":now}
         database.upsert_question(question,object_rows)

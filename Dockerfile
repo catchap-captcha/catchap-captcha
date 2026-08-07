@@ -41,19 +41,20 @@ RUN pip install --no-cache-dir -r requirements.runtime.txt
 COPY app ./app
 COPY static ./static
 
-# ★캡차 문항 자산 (이미지·조각)
+# ★캡차 문항 자산 (이미지·조각) — 2026-08-07 부터 ★이미지에 굽지 않는다
 #
-#   이 서비스는 자산을 로컬 디스크에서 읽는다(FINAL_DIR, 기본 data/final).
-#   서버의 data/final 은 3.5GB(69,111개)지만 **실제로 쓰이는 건 349MB(8,238개)** 다.
-#   나머지는 비활성 문항·원본·라벨링 중간산물이다.
+#   예전에는 여기서 `COPY data/final ./data/final` 로 367MB(8,238개)를 구웠다.
+#   그 자산은 .gitignore 로 막혀 있어 **git 에 없기 때문에**, GitHub Actions 가
+#   이미지를 구우면 "그런 파일 없음"으로 실패했다. 손으로만 구울 수 있는 이미지였다.
 #
-#   빌드 전에 scripts/collect_active_assets.sh 로 활성 문항 자산만 뽑아
-#   빌드 컨텍스트의 data/final 에 둬야 한다. 없으면 빌드는 되지만 문항 이미지가 404가 된다.
+#   ★이제 app/asset_storage.py 가 오브젝트 스토리지에서 읽는다
+#     (백엔드 app/services/media_storage.py 와 같은 방식).
 #
-#   ★★나중에 Object Storage 에서 읽도록 바꿀 예정이다(백엔드 media_storage.py 와 같은 방식).
-#     그때 이 COPY 는 빠지고 이미지가 다시 작아진다. 지금 굽는 이유는
-#     **이전 중에 동작까지 바꾸면 문제가 생겼을 때 원인을 못 가리기** 때문이다.
-COPY data/final ./data/final
+#     운영   ASSET_STORAGE_BACKEND=object  + ASSET_BUCKET · ASSET_S3_* 설정
+#     개발   ASSET_STORAGE_BACKEND=local   (기본값) → data/final 을 그대로 읽는다.
+#            로컬에서 자산이 필요하면 scripts/collect_active_assets.sh 로 뽑아 둔다.
+#
+#   ★얻는 것 — 이미지가 367MB 작아지고, 자산이 바뀌어도 ★재빌드가 필요 없다.
 
 EXPOSE 8000
 
