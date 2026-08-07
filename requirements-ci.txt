@@ -1,0 +1,26 @@
+# 시험만 돌리는 데 필요한 것 — CI 전용
+#
+# ★왜 requirements.txt 를 그대로 안 쓰나
+#   requirements.txt 에는 ultralytics 가 있고, 그것이 ★torch(2GB+)를 끌고 온다.
+#   torch 는 ★문항 이미지를 만들 때(YOLO 검출) 쓰는 것이지 시험이 부르지 않는다.
+#   실제로 확인했다 — 2026-08-07 기준 tests/ 36개가 아래 목록만으로 ★0.37초에 전부 통과한다.
+#   그대로 쓰면 CI 가 매번 2GB 를 받느라 몇 분을 버린다.
+#
+# ⚠️여기와 requirements.txt 의 판본 범위는 ★같게 유지할 것.
+#   시험은 통과하는데 실서비스가 다른 판본으로 도는 상황을 만들지 않기 위해서다.
+#   requirements.txt 에서 아래 줄들을 고치면 여기도 같이 고친다.
+#
+# ⬜시험이 앞으로 opencv·pandas·ultralytics 를 부르게 되면 그때 여기에 더한다.
+#   "혹시 몰라서" 미리 넣지 않는다 — 넣는 순간 CI 가 느려지고 이유가 사라진다.
+
+fastapi>=0.115,<1
+pydantic[email]>=2.8,<3
+PyMySQL>=1.1,<2
+orjson>=3.10,<4
+numpy>=2.0,<3
+Pillow>=10.4,<13
+python-multipart>=0.0.9,<1
+
+# 시험 도구
+pytest>=8.2,<9
+httpx>=0.27,<1
