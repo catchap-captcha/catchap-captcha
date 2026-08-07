@@ -1,0 +1,61 @@
+# 이미지에 들어가면 안 되는 것 · 넣을 이유가 없는 것
+#
+# ★이 파일이 없으면 빌드 컨텍스트에 data/ 전체(3.5GB+)와 .venv 가 딸려 들어가
+#   빌드가 몇 분씩 걸리고 이미지가 수 GB가 된다.
+
+# ── 비밀값 ──────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ── 자산: 실제 쓰는 것만 넣는다 ─────────────────────────
+# data/final 만 COPY 하고 나머지 하위 폴더는 전부 뺀다.
+# (raw·processed·labeling·snapshots 등은 문항을 만드는 중간산물이라
+#  서비스가 읽지 않는다. 합치면 서버에서 7GB가 넘는다)
+data/*
+!data/final
+
+# final 안에서도 서비스가 읽는 것만 — collect_active_assets.sh 가
+# images/ 와 pieces/ 만 채운다. 혹시 다른 게 섞여도 여기서 걸러진다.
+data/final/*
+!data/final/images
+!data/final/pieces
+
+# ── 개발 부산물 ────────────────────────────────────────
+.venv
+venv
+node_modules
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+
+# ── 이 이미지에서 안 쓰는 것 ───────────────────────────
+# scripts/ 는 문항 생성·라벨링 도구다(ultralytics·opencv 를 쓴다).
+# 배포와 무관하고, 넣으면 "이 이미지 안에서 돌려도 되나" 하는 오해를 만든다.
+scripts
+tests
+docs
+deploy
+
+# 화면 소스 — 빌드 결과(static/dist)만 쓰므로 소스는 필요 없다
+src
+public
+index.html
+vite.config.js
+package.json
+package-lock.json
+
+# 서버에 쌓여 있던 이전 빌드 백업들이 딸려오지 않게
+static/dist.*.bak
+*.bak
+app.*.bak
+
+# ── 저장소 메타 ────────────────────────────────────────
+.git
+.gitignore
+.github
+.claude
+README.md
