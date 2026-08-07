@@ -336,18 +336,24 @@ class Database:
             cur.execute("SELECT 1 FROM captcha_questions WHERE status='active' AND review_status='approved' LIMIT 1")
             return cur.fetchone() is not None
 
-    def active_question(self) -> dict[str, Any] | None:
-        """회전 출제: 노출 적은 문항 우선 + 쿨다운(방금 나온 문항 제외). 출제 시 노출 카운트 증가."""
+    def active_question(self, min_obj: int | None = None, max_obj: int | None = None) -> dict[str, Any] | None:
+        """회전 출제: 노출 적은 문항 우선 + 쿨다운(방금 나온 문항 제외). 출제 시 노출 카운트 증가.
+        min_obj/max_obj 지정 시 실객체(invalid 제외) 수가 그 범위인 문항만(step-up 계층용)."""
         cooldown = self.settings.rotation_cooldown_seconds
+        # 실객체 수 범위 필터(step-up). 없으면 전체.
+        oc_join = (" JOIN (SELECT question_id, SUM(role<>'invalid') oc FROM captcha_objects GROUP BY question_id) c"
+                   " ON c.question_id=q.id AND c.oc BETWEEN %s AND %s") if min_obj is not None else ""
+        oc_args = (min_obj, max_obj) if min_obj is not None else ()
         with self.connection() as conn, conn.cursor() as cur:
-            cur.execute("""SELECT * FROM captcha_questions
-              WHERE status='active' AND review_status='approved'
-                AND (last_served_at IS NULL OR last_served_at < UTC_TIMESTAMP(6) - INTERVAL %s SECOND)
-              ORDER BY served_count ASC, RAND() LIMIT 1""", (cooldown,))
+            cur.execute(f"""SELECT q.* FROM captcha_questions q{oc_join}
+              WHERE q.status='active' AND q.review_status='approved'
+                AND (q.last_served_at IS NULL OR q.last_served_at < UTC_TIMESTAMP(6) - INTERVAL %s SECOND)
+              ORDER BY q.served_count ASC, RAND() LIMIT 1""", (*oc_args, cooldown))
             question = cur.fetchone()
             if not question:  # 전부 쿨다운 중(풀이 작을 때)이면 쿨다운 무시
-                cur.execute("""SELECT * FROM captcha_questions WHERE status='active' AND review_status='approved'
-                  ORDER BY served_count ASC, RAND() LIMIT 1""")
+                cur.execute(f"""SELECT q.* FROM captcha_questions q{oc_join}
+                  WHERE q.status='active' AND q.review_status='approved'
+                  ORDER BY q.served_count ASC, RAND() LIMIT 1""", oc_args)
                 question = cur.fetchone()
             if not question: conn.commit(); return None
             cur.execute("UPDATE captcha_questions SET served_count=served_count+1, last_served_at=UTC_TIMESTAMP(6) WHERE id=%s", (question["id"],))
