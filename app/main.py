@@ -29,6 +29,7 @@ from .behavior_client import (
     resolve_final_verdict,
 )
 from . import asset_storage as asset_store
+from . import secrets_loader
 from .config import settings
 from .db import Database, utcnow
 
@@ -570,6 +571,15 @@ def append_final_manifest(question: dict, objects: list[dict]) -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    # ★비밀값을 어디서 받았는지 기동 로그에 남긴다. ★값은 안 찍는다(이름과 개수만).
+    #   ⚠️제일 위험한 경우는 SECRETS_BACKEND 가 없어서 로더가 ★조용히 아무것도
+    #   안 한 것이다 — 그때도 이 줄이 「미사용」이라고 말해 준다.
+    #   ★logging 대신 print 인 이유 = 이 앱은 로깅 설정을 하지 않아서
+    #   uvicorn 기본 설정으로는 INFO 가 어디에도 안 나온다(위 [SECURITY] 와 같은 방식).
+    import sys
+    _secrets = secrets_loader.last_result()
+    print("[SECRETS] " + (_secrets.summary() if _secrets
+                          else "Secrets Manager 로더가 실행되지 않았습니다"), file=sys.stderr)
     # ★자산 폴더는 로컬 백엔드일 때만 만든다. object 면 버킷에 있으므로 만들 폴더가 없다.
     paths = [settings.labeling_dir, settings.runtime_dir / "attempts",
              settings.runtime_dir / "behavior-events", settings.runtime_dir / "logs"]

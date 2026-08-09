@@ -5,6 +5,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+from .secrets_loader import load_secrets_into_env
+
+# ★Settings 클래스를 만들기 ★전에 금고를 읽어 os.environ 에 넣는다.
+#   이 파일의 Settings 는 dataclass 기본값이라 os.getenv 가 ★클래스 정의 시점에
+#   한 번 평가된다. 그래서 settings = Settings() 앞이 아니라 ★class 문 앞이어야 한다.
+#   (백엔드는 pydantic 이라 get_settings() 안에서 부르지만, 여기는 자리가 다르다.)
+# SECRETS_BACKEND 기본값이 none 이라 로컬 개발·시험에서는 아무 일도 일어나지 않는다.
+load_secrets_into_env()
+
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 
