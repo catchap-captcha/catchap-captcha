@@ -54,7 +54,12 @@ class Settings:
     )
     trust_proxy: bool = os.getenv("TRUST_PROXY", "false").lower() == "true"
     db_name: str = os.getenv("DB_NAME", "captcha_ms")
-    db_user: str = os.getenv("DB_USER", "catchap_dba")
+    # ⚠️★기본값을 "catchap_dba" 에서 ★빈 값으로 바꿨다 (0810).
+    #   그 계정은 세 DB 에 ALL PRIVILEGES 가 있는 ★사람용 스키마 변경 계정이다.
+    #   0810 에 DB_USER 가 ConfigMap 에서 금고로 옮겨 가면서, 금고에서 그 키만
+    #   빠지면 이 기본값에 ★실제로 닿을 수 있게 됐다(전에는 ConfigMap 이 항상 채웠다).
+    #   빈 값이면 접속이 곧바로 실패해 파드가 준비 안 됨으로 남는다 — 그게 옳은 실패다.
+    db_user: str = os.getenv("DB_USER", "")
     db_password: str = os.getenv("DB_PASSWORD", "")
     db_unix_socket: str = os.getenv("DB_UNIX_SOCKET", "/var/run/mysqld/mysqld.sock")
     db_host: str = os.getenv("DB_HOST", "127.0.0.1")

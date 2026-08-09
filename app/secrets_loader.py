@@ -67,7 +67,9 @@ _SM_DEFAULT = "https://secrets-manager-service.kr-central-2.kakaocloud.com"
 _TIMEOUT = 15
 
 # 주입을 허용하는 이름 — 대문자로 시작하는 환경변수 형식만.
-_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*$")
+# ★`$` 는 끝의 개행도 허용한다 — 개행이 붙은 이름이 ★통과했다(0810 실측).
+# 만들어지는 이름이 달라 실제 가로채기는 안 되지만, 규칙은 규칙대로 못 박는다.
+_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 
 # ★프로세스 동작 자체를 바꾸는 이름은 시크릿에 들어 있어도 주입하지 않는다.
 # Secrets Manager를 쓸 수 있는 사람이 앱의 실행 방식까지 바꿀 수 있으면 안 된다
@@ -78,7 +80,7 @@ _FORBIDDEN = frozenset({
     "HOME", "SHELL", "IFS", "BASH_ENV", "ENV",
     # 로더 자신의 설정 — 시크릿이 자기 출처를 바꾸지 못하게 한다
     "SECRETS_BACKEND", "SECRETS_NAMES", "SECRETS_ACCESS_KEY", "SECRETS_SECRET_KEY",
-    "SECRETS_ENDPOINT", "SECRETS_IAM_ENDPOINT",
+    "SECRETS_ENDPOINT", "SECRETS_IAM_ENDPOINT", "SECRETS_REQUIRED_VARS",
 })
 
 
@@ -277,5 +279,28 @@ def load_secrets_into_env(environ: dict | None = None) -> LoadResult:
         raise SecretsLoadError(
             f"시크릿 {len(names)}건을 읽었지만 주입할 변수가 하나도 없습니다"
         )
+
+    # ★★★부분 실패를 잡는다 — 위의 검사는 ★전체 합계가 0일 때만 걸린다.
+    #
+    # 시크릿 6건 중 하나에서 키 이름이 바뀌거나 빠지면, 나머지 5건이 성공했으므로
+    # 위 검사는 통과한다. 그러면 그 변수만 없는 채로 앱이 ★조용히 뜬다.
+    # 0810 에 실제로 재현했다 — `DB_USER` 가 `DB_USERNAME` 으로 잘못 들어간 시크릿을
+    # 흉내 냈더니 예외 없이 통과했고, 캡차가 dataclass 기본값(당시 `catchap_dba`)으로
+    # DB 에 붙으러 갔다.
+    #
+    # ★그래서 「반드시 있어야 하는 변수」를 배포가 명시하게 한다. `SECRETS_NAMES` 와
+    #   같은 철학이다 — 무엇을 기대하는지는 코드가 아니라 배포가 안다.
+    # ★비워 두면(기본값) 아무 검사도 안 한다 = 이 코드가 없는 것과 같다.
+    required = [v.strip() for v in (env.get("SECRETS_REQUIRED_VARS") or "").split(",") if v.strip()]
+    if required:
+        got = set(result.loaded)
+        missing = [v for v in required if v not in got]
+        if missing:
+            raise SecretsLoadError(
+                "SECRETS_REQUIRED_VARS 에 적힌 변수가 시크릿에 없습니다: "
+                + ", ".join(missing)
+                + f" (시크릿 {len(result.secrets_read)}건에서 변수 {len(result.loaded)}개를 받았습니다)"
+            )
+
     logger.info("%s", result.summary())
     return _remember(result)
