@@ -24,3 +24,7 @@ data/
 # OS / logs
 .DS_Store
 *.log
+
+# 참가자 코드 -> 사람 대응표. 서버에 올라가면 익명화가 무의미해진다.
+data/aim/participants.local.json
+*.local.json
