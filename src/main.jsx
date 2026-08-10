@@ -309,12 +309,21 @@ function CaptchaApp() {
     if (aimCapture && aimEventsRef.current.length) {
       // 드래그 하나가 끝날 때마다 그 앞의 조준 구간을 함께 넘긴다. 검증까지 기다리면
       // 실패한 시도의 조준 구간이 버려지는데, 실패한 시도도 사람이 만든 움직임이다.
+      // 이 드래그의 이벤트도 함께 넘긴다. 조준만 모으면 나중에 둘을 이어 붙일 수가
+      // 없다 — 조준은 이 로컬 수집기로, 드래그는 캡차 서버로 가서 짝을 맞출 키가
+      // 남지 않는다. 조준+드래그를 이어야 궤적이 12점에서 33점이 되고, 변형 공격
+      // 검출이 길이에 거의 전적으로 달려 있다(8~12점 1.4% · 31점 이상 96.8%).
+      //
+      // pendingEventsRef 는 읽기만 한다. 비우거나 건드리면 배치 전송이 깨진다.
+      const dragEvents = pendingEventsRef.current.filter(
+        (e) => e.object_id === dragging.object_id);
       const payload = {
         participant_id: participantId,
         challenge_id: challengeRef.current?.challenge_id ?? null,
         object_id: dragging.object_id,
         dropped_inside: inside,
         aim_events: aimEventsRef.current,
+        drag_events: dragEvents,
         captured_at: new Date().toISOString(),
       };
       aimEventsRef.current = [];
