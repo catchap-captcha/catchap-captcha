@@ -63,3 +63,17 @@
 .cc-debug{display:grid;gap:8px;margin-top:16px;padding:14px;border:1px solid #d6e6ff;border-radius:10px;background:#f6faff;color:#1d1d1f;font-size:12px}
 .cc-debug>strong{font-size:13px}.cc-debug>span,.cc-debug small{color:#5b6470}.cc-debug dl{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin:0}.cc-debug dl div{display:flex;justify-content:space-between;gap:8px;padding:7px 8px;border-radius:7px;background:#fff}.cc-debug dt{color:#6e7681}.cc-debug dd{margin:0;font-weight:700}
 @media(max-width:600px){.cc-top{padding:24px 22px 0}.cc-main{padding:22px 22px 0}.cc-bottom{padding:20px 22px 24px}.cc-sub{font-size:20px}.cc-stage{height:230px}}
+
+/* 조준 수집 실험용 막대(?aim=1 일 때만). 지금 어느 참가자로 기록되는지 보여준다 —
+   링크를 잘못 열어 앞사람 코드로 쌓이면 두 사람이 한 사람으로 합쳐지고, 같은 사람이
+   학습용과 시험용에 동시에 들어가 성적이 실제보다 좋게 나온다.
+   position:fixed 인 이유는 .cc-page 가 가로 flex 이고, 흐름에 넣으면 카드가 밀리기
+   때문이다. 무대 폭 500px 은 .cc-card 560px 에서 파생되므로 배치를 건드리면
+   기존 수집분과 조건이 달라진다. */
+.cc-aim-bar {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 50;
+  padding: 8px 14px;
+  border-bottom: 1px solid #d8dee6; background: #f7f9fc;
+  font-size: 13px; color: #35404d;
+}
+.cc-aim-bar b { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; }

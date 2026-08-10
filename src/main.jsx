@@ -251,8 +251,52 @@ function CaptchaApp() {
     return () => clearInterval(id);
   }, [challenge, token]);
 
+  // 수집 실험용(2026-08-08, 조성원). ?aim=1 일 때만 켜지고, 없으면 기존 동작 그대로다.
+  //
+  // 왜: 지금은 객체를 잡은 뒤(pointer_down)부터만 기록한다. 실측하면 세션당 이벤트
+  // 19.2개 중 드래그 밖은 0.2개 — 사실상 전부 버린다. 그런데 드래그 하나는 12개 점
+  // 뿐이고, 그 12개로는 사람끼리도 구별이 안 된다(사람 쌍 경로 유사도 최대 1.0000).
+  // 남은 유일한 약점인 재생 공격은 훔친 드래그를 변형한 것이라 드래그 구간만 갖고
+  // 있다. 조준 구간은 문항 배치마다 달라 재사용이 안 되므로, 여기에 신호가 있다면
+  // 재생을 정면으로 가른다.
+  //
+  // 켜기: ?participant=<코드>&aim=1
+  // 조준 이벤트는 캡차 서버로 보내지 않는다. 서버의 배치 검증은 정해진 타입만
+  // 받으므로 새 타입을 끼워 넣으면 배치가 통째로 거부되고, 그러면 실험이 캡차를
+  // 망가뜨린다. 별도 버퍼에 담아 우리 수집기로만 보낸다.
+  const aimCapture = embedParams.get("aim") === "1";
+  const aimEventsRef = useRef([]);
+  const aimLastMoveRef = useRef(0);
+
+  const recordAim = (event) => {
+    const now = Date.now();
+    // 캡차 서버와 같은 40ms 스로틀. 프로덕션이 보게 될 표본과 같아야 나중에
+    // "조준 구간을 켜면 이만큼 좋아진다" 는 비교가 성립한다.
+    if (now - aimLastMoveRef.current < 40) return;
+    aimLastMoveRef.current = now;
+    const rect = stageRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    aimEventsRef.current.push({
+      seq: aimEventsRef.current.length,
+      type: "aim_move",
+      x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
+      y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
+      x_pixel: event.clientX - rect.left,
+      y_pixel: event.clientY - rect.top,
+      timestamp_ms: now,
+      stage_width: rect.width,
+      stage_height: rect.height,
+      is_trusted: event?.isTrusted ?? null,
+      pointer_type: event?.pointerType ?? null,
+      coalesced_count: event?.nativeEvent?.getCoalescedEvents?.().length ?? null,
+    });
+  };
+
   const moveDrag = (event) => {
-    if (!dragging) return;
+    if (!dragging) {
+      if (aimCapture) recordAim(event);
+      return;
+    }
     setDragPoint({ x: event.clientX, y: event.clientY });
     record("pointer_move", dragging.object_id, event);
   };
@@ -262,6 +306,26 @@ function CaptchaApp() {
     if (!zone) return;
     const inside = event.clientX >= zone.left && event.clientX <= zone.right && event.clientY >= zone.top && event.clientY <= zone.bottom;
     record("drop", dragging.object_id, event);
+    if (aimCapture && aimEventsRef.current.length) {
+      // 드래그 하나가 끝날 때마다 그 앞의 조준 구간을 함께 넘긴다. 검증까지 기다리면
+      // 실패한 시도의 조준 구간이 버려지는데, 실패한 시도도 사람이 만든 움직임이다.
+      const payload = {
+        participant_id: participantId,
+        challenge_id: challengeRef.current?.challenge_id ?? null,
+        object_id: dragging.object_id,
+        dropped_inside: inside,
+        aim_events: aimEventsRef.current,
+        captured_at: new Date().toISOString(),
+      };
+      aimEventsRef.current = [];
+      aimLastMoveRef.current = 0;
+      fetch("/collect-aim", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        keepalive: true,
+      }).catch(() => {});   // 수집이 실패해도 캡차 풀이는 계속돼야 한다
+    }
     if (inside) {
       record("selection_add",dragging.object_id,event);
       setSelected((rows) => rows.includes(dragging.object_id) ? rows : [...rows, dragging.object_id]);
@@ -317,6 +381,9 @@ function CaptchaApp() {
   };
 
   return <div className="cc-page">
+    {aimCapture && <div className="cc-aim-bar">
+      참가자 <b>{participantId || "(없음 — ?participant= 를 붙이세요)"}</b>
+    </div>}
     <div className="cc-card" aria-live="polite">
       <div className="cc-top">
         <div className="cc-head">
