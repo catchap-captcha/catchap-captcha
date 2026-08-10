@@ -81,6 +81,7 @@ SCHEMA = [
       wrong_object_count INT UNSIGNED NOT NULL, average_speed DOUBLE NOT NULL,
       speed_variance DOUBLE NOT NULL, path_length DOUBLE NOT NULL,
       path_curvature DOUBLE NOT NULL, pause_count INT UNSIGNED NOT NULL,
+      automation_score INT NULL, client_signals JSON NULL,
       CONSTRAINT fk_summary_attempt FOREIGN KEY(attempt_id) REFERENCES captcha_attempts(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci""",
     """CREATE TABLE IF NOT EXISTS behavior_shadow_predictions (
@@ -297,7 +298,9 @@ class Database:
                               "ALTER TABLE captcha_questions ADD COLUMN served_count INT NOT NULL DEFAULT 0",
                               "ALTER TABLE captcha_questions ADD COLUMN last_served_at DATETIME(6) NULL",
                               "ALTER TABLE captcha_challenges_v2 ADD COLUMN pow_bits TINYINT UNSIGNED NOT NULL DEFAULT 0",
-                              "ALTER TABLE captcha_challenges_v2 ADD COLUMN honeypot_ids TEXT NULL"):
+                              "ALTER TABLE captcha_challenges_v2 ADD COLUMN honeypot_ids TEXT NULL",
+                              "ALTER TABLE behavior_summaries ADD COLUMN automation_score INT NULL",
+                              "ALTER TABLE behavior_summaries ADD COLUMN client_signals JSON NULL"):
                     try: cur.execute(alter); conn.commit()
                     except Exception: conn.rollback()
             finally: cur.execute("SELECT RELEASE_LOCK('security_captcha_v2_schema')")
@@ -532,17 +535,22 @@ class Database:
             question["objects"]=cur.fetchall(); return question
 
     def record_attempt(self, challenge_id: str, selected: list[str], correct: bool, reason: str | None,
-                       duration_ms: int, summary: dict[str, Any], raw_path: str | None) -> int:
+                       duration_ms: int, summary: dict[str, Any], raw_path: str | None,
+                       automation_score: int | None = None, client_signals: dict | None = None) -> int:
         with self.connection() as conn, conn.cursor() as cur:
             cur.execute("""INSERT INTO captcha_attempts(challenge_id,selected_object_ids,is_correct,failure_reason,
               duration_ms,behavior_summary,raw_event_path,created_at) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
               (challenge_id,json.dumps(selected),correct,reason,duration_ms,json.dumps(summary),raw_path,utcnow()))
             attempt_id=cur.lastrowid
+            # automation_score/client_signals는 시도별 원본으로 저장(규칙 게이트가 실트래픽에서
+            # 실제로 얼마나 잡는지 사후 측정용). 차단된 시도도 이 INSERT가 차단 반환보다 먼저라 남는다.
             cur.execute("""INSERT INTO behavior_summaries(attempt_id,reaction_time_ms,total_duration_ms,drag_count,
-              wrong_object_count,average_speed,speed_variance,path_length,path_curvature,pause_count)
-              VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (attempt_id,summary.get("reaction_time_ms"),duration_ms,
+              wrong_object_count,average_speed,speed_variance,path_length,path_curvature,pause_count,
+              automation_score,client_signals)
+              VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""", (attempt_id,summary.get("reaction_time_ms"),duration_ms,
               summary["drag_count"],summary["wrong_object_count"],summary["average_speed"],summary["speed_variance"],
-              summary["path_length"],summary["path_curvature"],summary["pause_count"]))
+              summary["path_length"],summary["path_curvature"],summary["pause_count"],
+              automation_score,json.dumps(client_signals) if client_signals is not None else None))
             cur.execute("UPDATE captcha_challenges_v2 SET attempt_count=attempt_count+1,status=%s,verified_at=%s WHERE id=%s",
                         ("passed" if correct else "failed", utcnow() if correct else None, challenge_id))
             conn.commit(); return int(attempt_id)

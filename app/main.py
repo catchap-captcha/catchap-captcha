@@ -849,9 +849,13 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
         "events":server_events,"telemetry_reason":telemetry_reason,
         "submitted_browser_event_count":len(payload.events),"answer_correct":correct,
         "behavior_summary":summary},ensure_ascii=False),encoding="utf-8")
+    # 규칙 게이트 신호를 시도별로 남긴다. 여기서 계산해 record_attempt에 넘겨야
+    # 차단 반환(아래)보다 먼저 저장돼, 차단된 시도의 automation_score도 기록에 남는다.
+    auto = automation_score(payload.client_signals)
     captcha_attempt_id = database.record_attempt(
         challenge_id, list(submitted), correct, reason, attempt_duration_ms, summary,
         str(event_file.relative_to(settings.runtime_dir)),
+        automation_score=auto, client_signals=payload.client_signals,
     )
     database.record_behavior_shadow_prediction(
         captcha_attempt_id, prediction, settings.behavior_policy_mode, main_verdict, final_verdict,
@@ -902,7 +906,8 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
             response["behavior_debug"] = debug_payload
         return response
     # ms 의 규칙 기반 게이트. 행동 AI 게이트(resolve_final_verdict)는 위에서 이미 적용됐다.
-    auto=automation_score(payload.client_signals); risk_total=summary["risk_score"]+auto
+    # auto 는 위 record_attempt 전에 계산·저장됨(차단된 시도도 기록 유지). 여기선 재사용.
+    risk_total=summary["risk_score"]+auto
     signature=summary["behavior_signature"]; database.record_fingerprint(payload.session_id,signature,risk_total)
     def _gated(body: dict) -> dict:
         if debug_payload is not None:
