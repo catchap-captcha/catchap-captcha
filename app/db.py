@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -284,7 +285,46 @@ class Database:
         finally:
             conn.close()
 
+    # ★기동할 때 있어야 하는 것 — schema_managed_externally 일 때 ★확인만 한다.
+    #   SCHEMA 에서 표 이름을 뽑아 쓰므로 표가 늘면 ★자동으로 같이 늘어난다.
+    _REQUIRED_COLUMNS = (
+        ("captcha_challenges_v2", "lecture_id"),
+        ("captcha_tokens", "lecture_id"),
+        ("captcha_questions", "served_count"),
+        ("captcha_questions", "last_served_at"),
+        ("captcha_challenges_v2", "pow_bits"),
+        ("captcha_challenges_v2", "honeypot_ids"),
+    )
+
+    def _verify_schema(self) -> None:
+        """DDL 을 하지 않는 모드에서, 있어야 할 표·칼럼이 다 있는지 본다.
+
+        ★없으면 기동을 막는다. 조용히 뜬 뒤 첫 요청에서 "그런 표 없음" 이 나면
+        원인이 멀어진다 — 비밀값 로더와 같은 원칙이다.
+        """
+        want = [re.search(r"CREATE TABLE IF NOT EXISTS (\w+)", s).group(1) for s in SCHEMA]
+        with self.connection(True) as conn, conn.cursor() as cur:
+            cur.execute("SHOW TABLES")
+            have = {list(row.values())[0] for row in cur.fetchall()}
+            missing_tables = [t for t in want if t not in have]
+            missing_cols = []
+            for table, column in self._REQUIRED_COLUMNS:
+                cur.execute(
+                    "SELECT COUNT(*) n FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s",
+                    (table, column))
+                if cur.fetchone()["n"] == 0:
+                    missing_cols.append(f"{table}.{column}")
+        if missing_tables or missing_cols:
+            raise RuntimeError(
+                "SCHEMA_MANAGED_EXTERNALLY=true 인데 스키마가 모자랍니다 — "
+                f"없는 표 {missing_tables or '없음'} · 없는 칼럼 {missing_cols or '없음'}. "
+                "catchap_dba 로 스키마를 먼저 적용하십시오(deploy/schema.sql).")
+
     def initialize(self) -> None:
+        if self.settings.schema_managed_externally:
+            self._verify_schema()
+            return
         with self.connection() as conn, conn.cursor() as cur:
             cur.execute("SELECT GET_LOCK('security_captcha_v2_schema', 20) acquired")
             if cur.fetchone()["acquired"] != 1: raise RuntimeError("schema lock unavailable")

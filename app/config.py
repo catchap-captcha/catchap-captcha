@@ -53,6 +53,19 @@ class Settings:
         part.strip() for part in os.getenv("EMBED_ORIGINS", "").split(",") if part.strip()
     )
     trust_proxy: bool = os.getenv("TRUST_PROXY", "false").lower() == "true"
+    # ★★스키마를 앱이 만들지 않는다 (2026-08-10).
+    #
+    #   지금까지 이 앱은 기동할 때마다 CREATE TABLE IF NOT EXISTS 를 14번,
+    #   멱등 ALTER 를 6번 했다. 그래서 앱 계정(catchap_captcha_app)에
+    #   ★CREATE·ALTER·INDEX·REFERENCES 권한을 줘야 했다.
+    #   = 캡차 파드가 뚫리면 ★표를 지우거나 바꿀 수 있다는 뜻이다.
+    #
+    #   true 면 기동할 때 DDL 을 ★안 하고, 대신 ★있어야 할 표·칼럼이 다 있는지
+    #   ★확인만 한다. 없으면 기동을 막는다 — 조용히 뜬 뒤 첫 요청에서
+    #   "그런 표 없음" 이 나면 원인이 멀어지기 때문이다.
+    #
+    #   ★기본값 false = 지금까지와 똑같이 동작한다(로컬 개발·시험).
+    schema_managed_externally: bool = os.getenv("SCHEMA_MANAGED_EXTERNALLY", "false").lower() == "true"
     db_name: str = os.getenv("DB_NAME", "captcha_ms")
     # ⚠️★기본값을 "catchap_dba" 에서 ★빈 값으로 바꿨다 (0810).
     #   그 계정은 세 DB 에 ALL PRIVILEGES 가 있는 ★사람용 스키마 변경 계정이다.
