@@ -53,8 +53,19 @@ class ChallengeCreate(BaseModel):
 
 
 class BehaviorEvent(BaseModel):
+    # aim_move = 집기 직전 조준 구간. 드래그(12점)만으로는 재생 공격을 못 가른다(사람 대
+    # 재생 AUC 0.516). 조준을 앞에 붙이면 31점을 넘겨 변형 재생 검출이 4%->96.8% 로 오른다.
+    # 문항마다 객체 위치가 달라 훔친 조준 자취는 재사용이 안 되는 것이 이 신호의 근거다.
+    #
+    # 받기만 한다 — 아래 어디에도 영향이 없는 것을 확인하고 넣었다.
+    #   · summarize(): drag_start 로 시작하는 구간만 모으고 그 안에서 pointer_move/drop 만
+    #     이어 붙인다. aim_move 는 어떤 세그먼트에도 안 들어가 요약 지표가 안 바뀐다.
+    #   · validate_behavior_lifecycle(): 조준은 challenge_loaded 와 pointer_down 사이라
+    #     첫/끝 타입과 필수 타입, 타임스탬프 단조 조건을 그대로 만족한다.
+    #   · 행동 AI 전송(behavior_client.adapt_events): 타입 매핑에 없으면 건너뛴다.
     type: Literal["challenge_loaded", "object_enter", "object_leave", "pointer_down", "drag_start",
-                  "pointer_move", "pointer_cancel", "drop", "selection_add", "object_removed", "submit", "verify_result"]
+                  "pointer_move", "pointer_cancel", "drop", "selection_add", "object_removed",
+                  "aim_move", "submit", "verify_result"]
     object_id: str | None = Field(default=None, max_length=64)
     x: float | None = Field(default=None, ge=0, le=1)
     y: float | None = Field(default=None, ge=0, le=1)
