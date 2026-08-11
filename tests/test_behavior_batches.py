@@ -429,3 +429,53 @@ def test_null_pointer_signals_do_not_break_canonicalisation():
         "is_primary": None, "event_timestamp": None, "coalesced_count": None,
     }]
     assert _payload_hash(events) == _payload_hash([dict(events[0])])
+
+
+def _drag_sequence() -> list[BehaviorEvent]:
+    """정상 드래그 한 번. 조준을 끼웠을 때와 비교할 기준이다."""
+    return [
+        BehaviorEvent(type="challenge_loaded", timestamp_ms=0),
+        BehaviorEvent(type="drag_start", object_id="obj", x=0.10, y=0.10, timestamp_ms=100),
+        BehaviorEvent(type="pointer_move", object_id="obj", x=0.20, y=0.20, timestamp_ms=140),
+        BehaviorEvent(type="pointer_move", object_id="obj", x=0.30, y=0.30, timestamp_ms=180),
+        BehaviorEvent(type="drop", object_id="obj", x=0.40, y=0.40, timestamp_ms=400),
+        BehaviorEvent(type="selection_add", object_id="obj", x=0.40, y=0.40, timestamp_ms=401),
+        BehaviorEvent(type="pointer_down", object_id="obj", x=0.10, y=0.10, timestamp_ms=99),
+        BehaviorEvent(type="submit", timestamp_ms=500),
+    ]
+
+
+def test_조준_구간이_배치_스키마에서_거부되지_않는다():
+    """드래그(12점)만으로는 재생 공격을 못 가른다. 조준을 앞에 붙여야 하는데,
+    타입이 스키마에 없으면 배치가 통째로 422 로 반려돼 궤적 수집 자체가 죽는다."""
+    event = BehaviorEvent(type="aim_move", x=0.3, y=0.4, timestamp_ms=50)
+    assert event.type == "aim_move"
+    assert event.object_id is None  # 조준은 아직 아무것도 안 집은 상태다
+
+
+def test_조준을_끼워도_요약_지표가_그대로다():
+    """summarize 는 drag_start 로 시작하는 구간만 모은다. 조준이 그 안에 섞이면
+    경로 길이·속도가 부풀어 지금까지 쌓은 값과 비교가 안 된다."""
+    base = _drag_sequence()
+    withaim = base[:1] + [
+        BehaviorEvent(type="aim_move", x=0.01, y=0.90, timestamp_ms=20),
+        BehaviorEvent(type="aim_move", x=0.05, y=0.50, timestamp_ms=60),
+    ] + base[1:]
+    pattern = {"session_challenges_10m": 0, "session_failures_10m": 0, "ip_challenges_1m": 0}
+    args = ({"obj"}, {"obj"}, 500, True, pattern, False)
+    assert summarize(base, *args) == summarize(withaim, *args)
+
+
+def test_조준이_있어도_생명주기_검사를_통과한다():
+    """조준은 challenge_loaded 와 pointer_down 사이에 온다. 첫/끝 타입과 필수 타입,
+    타임스탬프 단조 조건을 그대로 만족해야 한다."""
+    events = [
+        {"type": "challenge_loaded", "timestamp_ms": 0},
+        {"type": "aim_move", "timestamp_ms": 20},
+        {"type": "pointer_down", "timestamp_ms": 100},
+        {"type": "pointer_move", "timestamp_ms": 140},
+        {"type": "drop", "timestamp_ms": 400},
+        {"type": "selection_add", "timestamp_ms": 401},
+        {"type": "submit", "timestamp_ms": 500},
+    ]
+    assert validate_behavior_lifecycle(events) is None
