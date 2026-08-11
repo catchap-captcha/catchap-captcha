@@ -118,8 +118,21 @@ function CaptchaApp() {
   const collectorGenerationRef = useRef(0);
   const behaviorTransportFailedRef = useRef(false);
 
-  const flushBehavior = async () => {
-    if (flushPromiseRef.current) return flushPromiseRef.current;
+  const flushBehavior = async (drainDepth = 0) => {
+    // 진행 중인 flush는 이 호출 직전 큐에 들어온 이벤트(특히 verify 직전의 submit)를
+    // 아직 안 담았을 수 있다. 그 약속을 그대로 돌려주면 submit 이 전송되지 않은 채
+    // verify 가 진행돼 서버가 behavior_lifecycle_missing_submit 으로 떨군다
+    // (2026-08 원인규명, sw). → 진행 중 flush 를 기다린 뒤, 남은 이벤트(=submit)가
+    // 있으면 새 flush 로 이어 보낸다.
+    if (flushPromiseRef.current) {
+      await flushPromiseRef.current;
+      if (behaviorTransportFailedRef.current) return false;
+      // 종료 보장: 재귀가 flushPromiseRef 가 빈 fresh 경로에 닿으면 그쪽 while 이 큐를
+      // 통째로 비우므로 submit 은 그 안에 반드시 전송된다. verify 직전 마우스가 계속
+      // 움직여 뒤늦은 이벤트가 이어 들어오는 경우까지 무한히 쫓지 않도록 몇 회로 제한.
+      if (!pendingEventsRef.current.length || drainDepth >= 3) return true;
+      return flushBehavior(drainDepth + 1);
+    }
     if (behaviorTransportFailedRef.current) return false;
     const activeChallenge = challengeRef.current;
     const nonce = behaviorNonceRef.current;
