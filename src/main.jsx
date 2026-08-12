@@ -291,6 +291,14 @@ function CaptchaApp() {
   const aimEventsRef = useRef([]);
   const aimLastMoveRef = useRef(0);
 
+  // 조준을 캡차 서버로 보낼 수 있게 됐다. 예전에는 서버 배치 스키마가 aim_move 를
+  // 몰라서 끼워 넣으면 배치가 통째로 거부됐고, 그래서 로컬 수집기(/collect-aim)로만
+  // 보냈다. 실서비스에는 그 수집기가 없어 조준이 기록만 되고 사라졌다
+  // (2026-08-12 실측: 수집 링크 문항 324건 중 조준이 남은 건 0건).
+  //
+  // 이제 배치에 함께 실어 보낸다. 조준과 드래그가 같은 순서열에 남으므로 나중에
+  // 짝지을 필요도 없다 — 예전에는 조준은 로컬 수집기로, 드래그는 캡차 서버로 가서
+  // 이어 붙일 키가 없었다.
   const recordAim = (event) => {
     const now = Date.now();
     // 캡차 서버와 같은 40ms 스로틀. 프로덕션이 보게 될 표본과 같아야 나중에
@@ -299,8 +307,8 @@ function CaptchaApp() {
     aimLastMoveRef.current = now;
     const rect = stageRef.current?.getBoundingClientRect();
     if (!rect) return;
-    aimEventsRef.current.push({
-      seq: aimEventsRef.current.length,
+    const aimEvent = {
+      seq: nextEventSeqRef.current++,
       type: "aim_move",
       x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)),
       y: Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height)),
@@ -312,7 +320,11 @@ function CaptchaApp() {
       is_trusted: event?.isTrusted ?? null,
       pointer_type: event?.pointerType ?? null,
       coalesced_count: event?.nativeEvent?.getCoalescedEvents?.().length ?? null,
-    });
+    };
+    // 드래그 이벤트와 같은 큐에 넣는다. pendingEventsRef 는 배치 전송기가 비운다.
+    pendingEventsRef.current.push(aimEvent);
+    aimEventsRef.current.push(aimEvent);
+    scheduleBehaviorFlush();
   };
 
   const moveDrag = (event) => {
