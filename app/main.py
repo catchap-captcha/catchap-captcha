@@ -8,6 +8,7 @@ import math
 import os
 import secrets
 import time
+import sys
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager
@@ -658,10 +659,30 @@ def ready():
         not behavior_required
         or ai_readiness.policy_mode == settings.behavior_policy_mode
     )
+    # ★정책 불일치는 readiness 실패가 아니다.
+    #
+    # 두 서버는 각자 기동할 때 정책을 읽고, 재시작을 동시에 할 수는 없다. 그래서
+    # 정책을 바꾸는 동안에는 반드시 어긋나는 구간이 생긴다. 이걸 readiness 실패로
+    # 보면 30초 뒤 캡차 파드 2벌이 전부 빠져 로그인이 막힌다 — **켜는 행위 자체가
+    # 장애를 만든다.** 되돌릴 때도 똑같이 걸린다.
+    #
+    # 어긋나도 실제로는 아무 일도 안 일어난다. `resolve_final_verdict` 가 양쪽 다
+    # active 일 때만 시행하므로, 불일치 구간에는 그냥 시행이 안 될 뿐이다. 막아야 할
+    # 위험은 이미 거기서 막힌다.
+    #
+    # 대신 조용히 지나가면 안 된다. 영구적으로 어긋난 채로 두면 "켠 줄 알았는데 안
+    # 켜져 있는" 상태가 되고, 이 서비스는 조용한 실패로 여러 번 당했다. 응답에
+    # 남기고 로그로도 찍는다.
+    if behavior_required and not ai_policy_matches:
+        print(f"[POLICY] 캡차={settings.behavior_policy_mode} · "
+              f"행동AI={ai_readiness.policy_mode} — 어긋났습니다. 시행은 꺼져 있습니다. "
+              "바꾸는 중이라면 곧 맞춰지고, 아니라면 한쪽 ConfigMap 이 안 반영된 것입니다.",
+              file=sys.stderr, flush=True)
+
     service_ready = (
         database_ready
         and approved_questions
-        and (not behavior_required or (ai_readiness.ready and ai_policy_matches))
+        and (not behavior_required or ai_readiness.ready)
     )
     return {
         "status": "ok" if service_ready else "error",
