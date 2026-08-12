@@ -230,6 +230,7 @@ function CaptchaApp() {
     try {
       setMessage("새 문제를 불러오는 중입니다."); setToken(""); setSelected([]); setBehaviorDebug(null);
       collectorGenerationRef.current += 1;
+      submittedRef.current = false;
       if (flushTimerRef.current) window.clearTimeout(flushTimerRef.current);
       flushTimerRef.current = null;
       challengeRef.current = null;
@@ -289,6 +290,17 @@ function CaptchaApp() {
   const aimParam = embedParams.get("aim");
   const aimCapture = aimParam === "1" || (aimParam !== "0" && !!participantId);
   const aimEventsRef = useRef([]);
+  // 제출한 뒤에는 조준을 더 기록하지 않는다.
+  //
+  // flushBehavior 는 진행 중 flush 를 기다린 뒤 남은 이벤트를 이어 보내는데,
+  // 뒤늦게 계속 들어오는 이벤트를 무한히 쫓지 않으려고 3회로 제한한다. 조준을
+  // 배치 큐에 넣으면서 그 조건이 실제로 걸렸다 — 확인 버튼을 누른 뒤에도 포인터가
+  // 스테이지 위에 있으면 조준이 계속 큐에 들어와, 3회로는 못 따라잡고 submit 이
+  // 안 나간 채 포기한다. 서버는 그걸 behavior_lifecycle_missing_submit 으로 떨군다.
+  // 실측(2026-08-12): 유실이 7.6% -> 18.6% 로 늘었다.
+  //
+  // 제출 뒤의 조준은 분석 가치도 없다 — 문항이 이미 끝났다.
+  const submittedRef = useRef(false);
   const aimLastMoveRef = useRef(0);
 
   // 조준을 캡차 서버로 보낼 수 있게 됐다. 예전에는 서버 배치 스키마가 aim_move 를
@@ -300,6 +312,7 @@ function CaptchaApp() {
   // 짝지을 필요도 없다 — 예전에는 조준은 로컬 수집기로, 드래그는 캡차 서버로 가서
   // 이어 붙일 키가 없었다.
   const recordAim = (event) => {
+    if (submittedRef.current) return;
     const now = Date.now();
     // 캡차 서버와 같은 40ms 스로틀. 프로덕션이 보게 될 표본과 같아야 나중에
     // "조준 구간을 켜면 이만큼 좋아진다" 는 비교가 성립한다.
@@ -395,6 +408,7 @@ function CaptchaApp() {
   const verify = async () => {
     if (!challenge || !selected.length) { setMessage("옮길 객체를 먼저 선택해주세요."); return; }
     try {
+      submittedRef.current = true;
       record("submit", null, null);
       if (!(await flushBehavior())) {
         setMessage("행동 데이터를 서버에 전송하지 못했습니다. 다시 시도해주세요.");
