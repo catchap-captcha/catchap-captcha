@@ -26,6 +26,13 @@ _EVENT_TYPE_MAP = {
     "pointer_move": "pointermove",
     "drop": "pointerup",
     "pointer_cancel": "pointercancel",
+    # 집기 전 이동. 여기 없으면 아래 `mapped_type is None` 에서 조용히 버려진다 —
+    # 2026-08-12 까지 조준이 DB 에는 쌓이는데 모델은 못 보던 이유가 이것이다.
+    #
+    # 별도 이름으로 넘긴다. `pointermove` 로 합치면 AI 쪽 세션 특징 추출기가 유형을
+    # 안 가려서 조준까지 분류기 입력에 섞이는데, 배포 모델은 조준 없이 학습됐다.
+    # AI 서비스가 `aimmove` 를 재생 탐지기 전용으로 가른다(`api/predict.py`).
+    "aim_move": "aimmove",
 }
 
 
