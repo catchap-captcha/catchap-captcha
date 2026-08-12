@@ -262,3 +262,35 @@ def test_readiness_rejects_a_degraded_or_unreachable_behavior_service():
     assert degraded.detail == "behavior_ai_degraded"
     assert unreachable.ready is False
     assert unreachable.detail == "behavior_ai_request_failed:URLError"
+
+
+def test_adapter_forwards_the_aim_segment_under_its_own_type():
+    """조준(집기 전 이동)은 넘기되, 드래그 이벤트와 섞이지 않게 이름을 따로 둔다.
+
+    2026-08-12 까지 `aim_move` 가 타입 표에 없어 `mapped_type is None` 에서 조용히
+    버려졌다 — DB 에는 쌓이는데 모델은 못 보는 상태였다. 튕긴 시도의 드래그가 10.9점
+    일 때 그 앞 조준은 19.2점으로 멀쩡했으므로, 버린 것이 곧 판단 근거였다.
+
+    `pointermove` 로 합치면 안 된다. 행동 AI 의 세션 특징 추출기가 이벤트 유형을
+    안 가려서, 조준 없이 학습된 번들에 섞여 들어가면 판정이 흔들린다. 저쪽이
+    `aimmove` 를 재생 탐지기 전용으로 가른다.
+    """
+    events, counters = adapt_events(
+        [
+            {"type": "aim_move", "timestamp_ms": 200, "x": 0.05, "y": 0.05},
+            {"type": "aim_move", "timestamp_ms": 260, "x": 0.08, "y": 0.12},
+            *_events(),
+        ],
+        width=1000,
+        height=500,
+    )
+
+    assert [event["event_type"] for event in events] == [
+        "aimmove", "aimmove", "pointerdown", "pointermove", "pointerup",
+    ]
+    # 조준은 드래그 카운터를 건드리지 않는다 — 집은 횟수가 늘면 안 된다.
+    assert counters["drag_start_count"] == 1
+    assert counters["drop_count"] == 1
+    # 좌표는 다른 이벤트와 같은 규칙으로 픽셀·정규화 양쪽을 채운다.
+    assert events[0]["x"] == 0.05 * 1000
+    assert events[0]["x_normalized"] == 0.05
