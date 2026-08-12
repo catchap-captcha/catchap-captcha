@@ -294,3 +294,26 @@ def test_adapter_forwards_the_aim_segment_under_its_own_type():
     # 좌표는 다른 이벤트와 같은 규칙으로 픽셀·정규화 양쪽을 채운다.
     assert events[0]["x"] == 0.05 * 1000
     assert events[0]["x_normalized"] == 0.05
+
+
+def test_policy_mismatch_does_not_enforce():
+    """양쪽이 다 active 여야만 시행한다 — 어긋난 동안에는 그냥 시행이 안 될 뿐이다.
+
+    그래서 정책 불일치를 readiness 실패로 볼 이유가 없다. 그렇게 두면 정책을 바꾸는
+    행위 자체가 캡차 파드를 서비스에서 빼버린다(`/health/ready`, 0812).
+    """
+    scored_active = BehaviorPrediction(
+        attempt_id="attempt", status="scored", risk_score=99.0, risk_level="high",
+        recommended_action="step_up", policy_mode="active",
+    )
+    verdict, action = resolve_final_verdict(
+        captcha_correct=True, prediction=scored_active, local_policy_mode="shadow")
+    assert (verdict, action) == ("passed", None)
+
+    scored_shadow = BehaviorPrediction(
+        attempt_id="attempt", status="scored", risk_score=99.0, risk_level="high",
+        recommended_action="step_up", policy_mode="shadow",
+    )
+    verdict, action = resolve_final_verdict(
+        captcha_correct=True, prediction=scored_shadow, local_policy_mode="active")
+    assert (verdict, action) == ("passed", None)
