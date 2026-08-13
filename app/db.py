@@ -268,6 +268,8 @@ class Database:
         self.settings = settings
         # ★캐시는 '있으면 쓰는 것'이다. 없거나 죽어도 아래 질의가 그대로 돈다.
         self.cache = Cache(settings)
+        # 조각 총수는 거의 안 변한다(문항을 새로 넣을 때만). 요청마다 세면 낭비다.
+        self._piece_total: int | None = None
 
     def _connect(self, autocommit: bool = False) -> pymysql.Connection:
         kwargs: dict[str, Any] = dict(
@@ -498,6 +500,34 @@ class Database:
         # ★커밋 뒤에 센다 — 캐시가 실패해도 DB 는 이미 끝나 있다.
         self.cache.bump("ip_challenges_1m", challenge.get("client_ip_hash") or "")
         self.cache.bump("session_challenges_10m", challenge.get("session_id") or "")
+
+    def decoy_piece_path(self, exclude_question_id: str, seed: str) -> str | None:
+        """함정에게 입혀 줄 **진짜 조각**의 경로. 같은 씨앗이면 늘 같은 것이 나온다.
+
+        왜 다른 문항의 진짜 조각인가 — 함정 미리보기가 404 라서 봇이 문제를 풀기도 전에
+        함정을 전부 걸러냈다(2026-08-13 실측: 10문항 3개씩 전부 적중, 캡차 시도 0회).
+        사진에서 그 자리를 네모로 잘라 주는 방법도 있지만, 진짜 조각은 배경이 뚫린
+        오려낸 그림이고 네모 크롭은 불투명한 사각형이라 그림만 봐도 갈린다.
+
+        같은 문항의 조각은 뺀다. 사진 안에 있는 물건이 함정 자리에서 또 나오면
+        사람 눈에 이상하고, 봇에게는 "이 문항 안의 조각 = 함정" 이라는 새 단서가 된다.
+        """
+        with self.connection(True) as conn, conn.cursor() as cur:
+            if self._piece_total is None:
+                cur.execute("""SELECT COUNT(*) n FROM captcha_objects
+                  WHERE piece_path IS NOT NULL AND piece_path<>''""")
+                self._piece_total = int(cur.fetchone()["n"])
+            if not self._piece_total:
+                return None
+            offset = int(hashlib.sha256(seed.encode()).hexdigest(), 16) % self._piece_total
+            for candidate in (offset, 0):
+                cur.execute("""SELECT piece_path FROM captcha_objects
+                  WHERE piece_path IS NOT NULL AND piece_path<>'' AND question_id<>%s
+                  ORDER BY id LIMIT %s,1""", (exclude_question_id, candidate))
+                row = cur.fetchone()
+                if row:
+                    return row["piece_path"]
+            return None
 
     def request_pattern(self, session_id: str, client_ip_hash: str) -> dict[str, int]:
         with self.connection(True) as conn, conn.cursor() as cur:

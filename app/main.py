@@ -872,7 +872,23 @@ def challenge_asset(challenge_id: str, asset_id: str):
     if question is None: raise HTTPException(404, "Question not found")
     if asset_id == "image": return asset_store.asset_response(question["image_path"])
     mapping = next((m for m in challenge["objects"] if m["temporary_object_id"] == asset_id), None)
-    if not mapping: raise HTTPException(404, "Asset not found")
+    if not mapping:
+        # ★함정도 그림을 준다. 안 주면 **함정이 404 로 들통난다.**
+        #
+        # 함정은 객체 표에 안 들어가므로 여기서 못 찾고 404 가 됐다. 그런데 진짜 객체는
+        # 35,508개 전부 조각이 있어서 `404 = 함정` 이 예외 없이 성립했다 — 봇이 문제를
+        # 풀기도 전에, 캡차 시도를 **한 번도 쓰지 않고** 함정을 전부 걸러낼 수 있었다
+        # (2026-08-13 실측: 10문항에서 3개씩 전부 적중, 문항당 1.2초).
+        #
+        # 걸러내면 함정을 3개로 늘린 효과(찍기 성공률 33%→20%)가 통째로 사라진다.
+        honeypots = set(json.loads(challenge["honeypot_ids"])) if challenge.get("honeypot_ids") else set()
+        if asset_id not in honeypots:
+            raise HTTPException(404, "Asset not found")
+        # 훑고 있다는 사실 자체를 적어 둔다 — 제출할 때 이걸 본다(`verify`).
+        database.cache.mark_honeypot_probe(challenge_id, asset_id)
+        decoy = database.decoy_piece_path(challenge["question_id"], asset_id)
+        if not decoy: raise HTTPException(404, "Piece not found")
+        return asset_store.asset_response(decoy)
     if not mapping.get("piece_path"): raise HTTPException(404, "Piece not found")
     return asset_store.asset_response(mapping["piece_path"])
 
@@ -991,6 +1007,11 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
                       current_ip_hash!=challenge["client_ip_hash"])
     summary["stop_go_signal"] = stop_go_signal
     summary["batch_delivery_timing"] = batch_delivery_timing
+    # 문항을 받고 함정 미리보기를 훑었나. 캐시가 죽어 있으면 0 이 온다 — 그때는 이
+    # 신호가 없는 것으로 친다(탐지 신호지 관문이 아니다).
+    honeypot_probes = database.cache.honeypot_probe_count(challenge_id)
+    probed = honeypot_probes >= settings.honeypot_probe_block
+    summary["honeypot_probes"] = honeypot_probes
 
     # During shadow rollout we retain the CAPTCHA outcome but record the
     # missing/invalid telemetry. In active mode it must receive a step-up.
@@ -1048,8 +1069,12 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
         }
     # ⑤ 봇 궤적을 행동채점(shadow)·기록에 흘려보낸 뒤에 차단한다. 확정 봇의 궤적은 우리가 가장
     # 부족한 라벨 데이터인데, 채점 전에 return 하면 그게 버려진다. 어차피 봇이라 사용자 영향 0.
-    if hit_honeypot:
-        response = {"success":False,"blocked":True,"risk_level":"automated","reason":"honeypot"}
+    if hit_honeypot or probed:
+        # 훑은 것도 밟은 것과 같이 다룬다 — 둘 다 "어느 게 함정인지 알아내려 했다" 이고,
+        # 사람이 할 수 있는 행동이 아니다. 여기까지 내려온 뒤에 막는 이유는 위와 같다:
+        # 확정 봇의 궤적이 우리가 가장 부족한 자료라서 채점·기록을 먼저 태운다.
+        response = {"success":False,"blocked":True,"risk_level":"automated",
+                    "reason":"honeypot" if hit_honeypot else "honeypot_probe"}
         if debug_payload is not None:
             response["behavior_debug"] = debug_payload
         return response
