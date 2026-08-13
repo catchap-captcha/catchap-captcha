@@ -139,6 +139,30 @@ class Settings:
     # active 승격 go/no-go 기준: 사람 프록시(정답 통과) 표본 최소치 + 허용 오탐 프록시율.
     behavior_promote_min_passed: int = int(os.getenv("BEHAVIOR_PROMOTE_MIN_PASSED", "500"))
     behavior_promote_max_fp_rate: float = float(os.getenv("BEHAVIOR_PROMOTE_MAX_FP_RATE", "0.02"))
+    # ── Valkey(캐시) ────────────────────────────────────────────────
+    # ★기본값은 전부 "안 쓴다" 이다. VALKEY_HOST 가 비어 있으면 코드가 캐시를
+    #   아예 건드리지 않고 지금까지처럼 DB 만 쓴다 — 로컬 개발·시험이 그대로 돈다.
+    # ⚠️캐시가 죽으면 ★DB 로 되돌아간다. "캐시가 죽으면 통과" 는 하지 않는다 —
+    #   캐시를 죽이는 것이 곧 레이트리밋 우회가 되기 때문이다.
+    valkey_host: str = os.getenv("VALKEY_HOST", "")
+    valkey_port: int = int(os.getenv("VALKEY_PORT", "6379"))
+    valkey_username: str = os.getenv("VALKEY_USERNAME", "")
+    valkey_password: str = os.getenv("VALKEY_PASSWORD", "")
+    valkey_tls: bool = os.getenv("VALKEY_TLS", "false").lower() == "true"
+    valkey_tls_ca_file: str = os.getenv("VALKEY_TLS_CA_FILE", "")
+    # ★인증서에 SAN 이 없어 엔드포인트가 아니라 CN 을 줘야 한다. 자세한 것은 cache.py.
+    valkey_tls_server_name: str = os.getenv("VALKEY_TLS_SERVER_NAME", "")
+    valkey_key_prefix: str = os.getenv("VALKEY_KEY_PREFIX", "cc:")
+    valkey_timeout_seconds: float = float(os.getenv("VALKEY_TIMEOUT_SECONDS", "0.3"))
+    # ★연결에 실패하면 이만큼 쉬었다가 다시 시도한다. 안 쉬면 캐시가 죽었을 때
+    #   요청마다 연결을 다시 걸어 ★캐시 없을 때보다 느려진다.
+    valkey_retry_seconds: float = float(os.getenv("VALKEY_RETRY_SECONDS", "10"))
+    # 1단계는 ★캐시와 DB 를 같이 돌려 값을 비교만 한다. 판정은 여전히 DB 값으로 한다.
+    #   compare  둘 다 세고 다르면 로그만 남긴다 (기본)
+    #   cache    캐시 값으로 판정한다 (비교가 충분히 쌓인 뒤에 켠다)
+    valkey_rate_limit_mode: Literal["off", "compare", "cache"] = os.getenv(
+        "VALKEY_RATE_LIMIT_MODE", "compare")  # type: ignore[assignment]
+
     final_dir: Path = path_setting("FINAL_DIR", "data/final")
     # ★문항 자산(이미지·조각·매니페스트)을 어디에 두는가 — app/asset_storage.py 참고.
     #   local  : 지금까지와 같은 로컬 디스크(final_dir). 개발·시험의 기본값.
@@ -175,6 +199,8 @@ class Settings:
             raise RuntimeError("BEHAVIOR_POLICY_MODE must be shadow or active")
         if self.behavior_event_transport not in {"off", "shadow", "active"}:
             raise RuntimeError("BEHAVIOR_EVENT_TRANSPORT must be off, shadow or active")
+        if self.valkey_rate_limit_mode not in {"off", "compare", "cache"}:
+            raise RuntimeError("VALKEY_RATE_LIMIT_MODE must be off, compare or cache")
         if os.getenv("APP_ENV", "development") == "production":
             for name, value in {
                 "APP_SECRET": self.app_secret,
