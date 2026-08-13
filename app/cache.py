@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 from typing import Any
 
 from .config import Settings
@@ -56,6 +57,9 @@ class Cache:
         self._client: Any | None = None
         self._lock = threading.Lock()
         self._warned: set[str] = set()
+        # ★연결에 실패하면 잠시 쉰다. 안 그러면 캐시가 죽었을 때 ★요청마다
+        #   연결을 다시 시도해 오히려 느려진다(연결 제한시간 × 카운터 수).
+        self._retry_after = 0.0
 
     # ── 연결 ────────────────────────────────────────────────────────
     @property
@@ -108,11 +112,21 @@ class Cache:
     def _get(self) -> Any | None:
         if not self.enabled:
             return None
-        if self._client is None:
-            with self._lock:
+        if self._client is not None:
+            return self._client
+        if time.monotonic() < self._retry_after:
+            return None                      # ★쉬는 중 — 조용히 DB 로 간다
+        with self._lock:
+            if self._client is None and time.monotonic() >= self._retry_after:
+                self._client = self._connect()
                 if self._client is None:
-                    self._client = self._connect()
+                    self._retry_after = time.monotonic() + self.settings.valkey_retry_seconds
         return self._client
+
+    def drop(self) -> None:
+        """쓰다가 실패했을 때 연결을 버린다 — 다음 요청이 새로 붙게."""
+        self._client = None
+        self._retry_after = time.monotonic() + self.settings.valkey_retry_seconds
 
     def _warn_once(self, key: str, message: str) -> None:
         """같은 경고로 로그를 채우지 않는다 — 챌린지마다 찍히면 로그를 못 쓰게 된다."""
@@ -139,6 +153,7 @@ class Cache:
             pipe.execute()
         except Exception as exc:
             self._warn_once("bump", f"카운터 증가 실패 — DB 로만 셉니다: {exc}")
+            self.drop()
 
     def read(self, names_values: dict[str, str]) -> dict[str, int] | None:
         """여러 카운터를 한 번에 읽는다. ★하나라도 실패하면 None(=DB 를 쓰라)."""
@@ -151,6 +166,7 @@ class Cache:
             return {n: int(v or 0) for n, v in zip(names, raw)}
         except Exception as exc:
             self._warn_once("read", f"카운터 읽기 실패 — DB 값을 씁니다: {exc}")
+            self.drop()
             return None
 
     def ping(self) -> bool:
