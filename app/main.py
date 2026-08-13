@@ -200,14 +200,46 @@ def _place_honeypot(boxes: list[tuple], rng, size_min: float = 0.06, size_max: f
     return None
 
 
-def automation_score(sig: dict | None) -> int:
-    """자동화 브라우저 신호 점수. webdriver/헤드리스는 순정 자동화의 강한 흔적."""
-    if not isinstance(sig, dict): return 0
+def headless_brand(sec_ch_ua: str | None) -> bool:
+    """요청 헤더에 헤드리스 브라우저가 **스스로 적어 보낸** 흔적이 있는가.
+
+    왜 헤더를 따로 보나
+    -------------------
+    `client_signals` 는 화면 쪽 자바스크립트가 신고하는 값이라 봇이 그냥 거짓말하면 된다.
+    2026-08-13 실측 — 흔히 쓰는 회피 두 줄(`--disable-blink-features=AutomationControlled`
+    + `navigator.webdriver` 를 가리는 초기 스크립트)만으로 점수가 이렇게 바뀐다.
+
+        평범한 Playwright   webdriver=true · headlessUA=true   -> 160  (차단)
+        회피 두 줄 추가     webdriver=false · headlessUA=false ->   0  (통과)
+
+    그런데 같은 요청의 `Sec-CH-UA` 헤더에는 `"HeadlessChrome"` 이 **그대로 남아 있었다.**
+    이 헤더는 브라우저가 붙이고 서버가 직접 받는 값이라, 위 회피로는 안 바뀐다.
+
+    왜 '없으면 0' 인가
+    ------------------
+    ★Safari 와 Firefox 는 이 헤더를 **아예 안 보낸다.** 없는 것을 의심으로 치면 그 브라우저
+    사용자 전원이 걸린다 — 아이폰·맥 사용자가 통째로 막히는 종류의 실수다. 그래서
+    **적혀 있을 때만** 본다. 정상 크롬은 `"Google Chrome"`/`"Chromium"` 을 적어 보낸다.
+    """
+    if not sec_ch_ua:
+        return False
+    return "headless" in sec_ch_ua.lower()
+
+
+def automation_score(sig: dict | None, sec_ch_ua: str | None = None) -> int:
+    """자동화 브라우저 신호 점수. webdriver/헤드리스는 순정 자동화의 강한 흔적.
+
+    앞의 셋은 화면이 신고하는 값이고 마지막 하나는 **서버가 헤더에서 직접 읽는 값**이다.
+    앞의 것들은 봇이 고칠 수 있고 뒤의 것은 그 회피로는 안 고쳐진다(`headless_brand`).
+    """
     s = 0
-    if sig.get("webdriver"): s += 80
-    if sig.get("headlessUA"): s += 80
-    if sig.get("languages", 1) == 0: s += 15
-    if sig.get("cores", 1) == 0: s += 10
+    if isinstance(sig, dict):
+        if sig.get("webdriver"): s += 80
+        if sig.get("headlessUA"): s += 80
+        if sig.get("languages", 1) == 0: s += 15
+        if sig.get("cores", 1) == 0: s += 10
+    # 신고한 값이 깨끗해도 이것만으로 차단에 닿게 둔다 — 거짓말한 쪽이 더 나쁜 신호다.
+    if headless_brand(sec_ch_ua): s += 80
     return s
 
 
@@ -1094,7 +1126,9 @@ def verify(challenge_id: str, payload: VerifyRequest, request: Request,
             response["behavior_debug"] = debug_payload
         return response
     # ms 의 규칙 기반 게이트. 행동 AI 게이트(resolve_final_verdict)는 위에서 이미 적용됐다.
-    auto=automation_score(payload.client_signals); risk_total=summary["risk_score"]+auto
+    # 헤더는 요청에서 직접 읽는다 — 화면이 신고한 값과 달리 봇이 못 고치는 쪽이다.
+    auto=automation_score(payload.client_signals, request.headers.get("sec-ch-ua"))
+    risk_total=summary["risk_score"]+auto
     signature=summary["behavior_signature"]; database.record_fingerprint(payload.session_id,signature,risk_total)
     def _gated(body: dict) -> dict:
         if debug_payload is not None:
