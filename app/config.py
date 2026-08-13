@@ -137,6 +137,9 @@ class Settings:
     valkey_tls_server_name: str = os.getenv("VALKEY_TLS_SERVER_NAME", "")
     valkey_key_prefix: str = os.getenv("VALKEY_KEY_PREFIX", "cc:")
     valkey_timeout_seconds: float = float(os.getenv("VALKEY_TIMEOUT_SECONDS", "0.3"))
+    # ★연결에 실패하면 이만큼 쉬었다가 다시 시도한다. 안 쉬면 캐시가 죽었을 때
+    #   요청마다 연결을 다시 걸어 ★캐시 없을 때보다 느려진다.
+    valkey_retry_seconds: float = float(os.getenv("VALKEY_RETRY_SECONDS", "10"))
     # 1단계는 ★캐시와 DB 를 같이 돌려 값을 비교만 한다. 판정은 여전히 DB 값으로 한다.
     #   compare  둘 다 세고 다르면 로그만 남긴다 (기본)
     #   cache    캐시 값으로 판정한다 (비교가 충분히 쌓인 뒤에 켠다)
