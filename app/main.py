@@ -12,7 +12,7 @@ import sys
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Literal
 
@@ -240,8 +240,24 @@ def safe_asset(root: Path, relative: str) -> Path:
     return candidate
 
 
+def _json_safe(request_pattern: dict[str, object]) -> dict[str, object]:
+    """요약에 담기 전에 날짜를 문자열로 바꾼다.
+
+    ★이게 없으면 **세션의 두 번째 시도부터 전부 500** 이 난다. `request_pattern` 은
+    통째로 요약에 들어가고(`summarize` 의 반환), 그 요약을 두 곳에서 `json.dumps` 한다
+    (궤적 파일 기록·`record_attempt`). 그런데 `last_failure_at` 은 날짜라 직렬화가 안 된다.
+    첫 시도는 아직 오답이 없어 값이 `None` 이라 통과하고, 두 번째부터 터진다 — 그래서
+    "가끔 되는 것"처럼 보였다(2026-08-13 실측: 새 세션 3/3 성공, 같은 세션 2회차 3/3 실패).
+
+    값을 지우지 않고 문자열로 남긴다. 대기 사다리가 언제부터 재는지가 요약에 남아야
+    나중에 "왜 이 사람이 기다렸나" 를 되짚을 수 있다.
+    """
+    return {key: (value.isoformat() if isinstance(value, datetime) else value)
+            for key, value in request_pattern.items()}
+
+
 def summarize(events: list[BehaviorEvent], selected: set[str], targets: set[str], duration_ms: int,
-              correct: bool, request_pattern: dict[str, int], ip_changed: bool) -> dict:
+              correct: bool, request_pattern: dict[str, object], ip_changed: bool) -> dict:
     segments: list[list[BehaviorEvent]]=[]; current: list[BehaviorEvent]=[]
     for event in events:
         if event.type=="drag_start" and event.x is not None and event.y is not None:
@@ -325,7 +341,7 @@ def summarize(events: list[BehaviorEvent], selected: set[str], targets: set[str]
         "pause_count":pause_count,
         "total_duration_ms": duration_ms,"object_dwell_ms":dwell_ms,"selection_order":selection_order,
         "removal_order":removal_order,"correction_count":len(removal_order),"answer_correct":correct,
-        "request_pattern":request_pattern,"ip_changed":ip_changed,"risk_components":components,
+        "request_pattern":_json_safe(request_pattern),"ip_changed":ip_changed,"risk_components":components,
         "risk_score":risk_score,"risk_level":risk_level,
     }
 
