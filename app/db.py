@@ -286,7 +286,14 @@ class Database:
             conn.close()
 
     # ★기동할 때 있어야 하는 것 — schema_managed_externally 일 때 ★확인만 한다.
-    #   SCHEMA 에서 표 이름을 뽑아 쓰므로 표가 늘면 ★자동으로 같이 늘어난다.
+    #   SCHEMA 에서 표 이름과 ★칼럼을 뽑아 쓰므로, 표든 칼럼이든 늘면 ★자동으로 같이 늘어난다.
+    #
+    # ⚠️아래 목록은 ★CREATE TABLE 에는 없고 ALTER 로만 추가되는 칼럼만 적는다.
+    #   (initialize() 의 멱등 ALTER 목록과 짝을 이룬다)
+    #   ★CREATE TABLE 안에 있는 칼럼은 여기 적을 필요가 없다 — 자동으로 잡힌다.
+    #
+    # ★0813 이전에는 이 손 목록 6개만 봤다. SCHEMA 의 칼럼 118개는 아무도 안 봐서,
+    #   「칼럼만 추가된 변경」은 검사를 그냥 통과하고 첫 요청에서 터질 수 있었다.
     _REQUIRED_COLUMNS = (
         ("captcha_challenges_v2", "lecture_id"),
         ("captcha_tokens", "lecture_id"),
@@ -296,25 +303,79 @@ class Database:
         ("captcha_challenges_v2", "honeypot_ids"),
     )
 
+    # ★CREATE TABLE 본문에서 칼럼 이름을 뽑는다.
+    #   ⚠️줄 단위로 뽑으면 안 된다 — 한 줄에 칼럼이 여러 개 있어서 첫 개만 잡힌다.
+    #     (0813 에 실제로 그렇게 세다가 118개를 57개로 잘못 셌다)
+    #   그래서 ★괄호 깊이를 세며 최상위 쉼표로 자른다. DECIMAL(10,2) 같은 것이 안 잘리게.
+    _COLUMN_TYPES = (
+        r"(VARCHAR|INT|BIGINT|TINYINT|DATETIME|JSON|LONGTEXT|MEDIUMTEXT|TEXT|CHAR|DECIMAL"
+        r"|FLOAT|DOUBLE|BOOLEAN|BOOL|ENUM|BLOB|SMALLINT|MEDIUMINT|TIMESTAMP|DATE)\b")
+    _NOT_A_COLUMN = re.compile(
+        r"^\s*(PRIMARY|UNIQUE|INDEX|KEY|CONSTRAINT|FOREIGN|FULLTEXT|SPATIAL|CHECK)\b", re.I)
+
+    @staticmethod
+    def _split_top_level(body: str) -> list[str]:
+        """괄호 밖의 쉼표로만 자른다."""
+        parts, depth, cur = [], 0, ""
+        for ch in body:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                if depth == 0:      # CREATE TABLE 을 닫는 괄호 — 여기서 끝
+                    break
+                depth -= 1
+            if ch == "," and depth == 0:
+                parts.append(cur)
+                cur = ""
+            else:
+                cur += ch
+        if cur.strip():
+            parts.append(cur)
+        return parts
+
+    @classmethod
+    def _schema_columns(cls) -> dict[str, set[str]]:
+        """SCHEMA + ALTER 전용 목록 → {표: {칼럼}}."""
+        want: dict[str, set[str]] = {}
+        for statement in SCHEMA:
+            table = re.search(r"CREATE TABLE IF NOT EXISTS (\w+)", statement).group(1)
+            columns = set()
+            for part in cls._split_top_level(statement[statement.index("(") + 1:]):
+                text = part.strip()
+                if not text or cls._NOT_A_COLUMN.match(text):
+                    continue
+                found = re.match(r"^`?(\w+)`?\s+" + cls._COLUMN_TYPES, text, re.I)
+                if found:
+                    columns.add(found.group(1))
+            want[table] = columns
+        for table, column in cls._REQUIRED_COLUMNS:   # ★ALTER 로만 붙는 것
+            want.setdefault(table, set()).add(column)
+        return want
+
     def _verify_schema(self) -> None:
         """DDL 을 하지 않는 모드에서, 있어야 할 표·칼럼이 다 있는지 본다.
 
         ★없으면 기동을 막는다. 조용히 뜬 뒤 첫 요청에서 "그런 표 없음" 이 나면
         원인이 멀어진다 — 비밀값 로더와 같은 원칙이다.
         """
-        want = [re.search(r"CREATE TABLE IF NOT EXISTS (\w+)", s).group(1) for s in SCHEMA]
+        want_columns = self._schema_columns()
+        want = list(want_columns)
         with self.connection(True) as conn, conn.cursor() as cur:
             cur.execute("SHOW TABLES")
             have = {list(row.values())[0] for row in cur.fetchall()}
             missing_tables = [t for t in want if t not in have]
             missing_cols = []
-            for table, column in self._REQUIRED_COLUMNS:
+            # ★표마다 한 번씩만 묻는다 — 칼럼마다 물으면 질의가 100번을 넘는다.
+            for table in want:
+                if table in missing_tables:
+                    continue
                 cur.execute(
-                    "SELECT COUNT(*) n FROM information_schema.COLUMNS "
-                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s",
-                    (table, column))
-                if cur.fetchone()["n"] == 0:
-                    missing_cols.append(f"{table}.{column}")
+                    "SELECT COLUMN_NAME c FROM information_schema.COLUMNS "
+                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s", (table,))
+                present = {row["c"] for row in cur.fetchall()}
+                for column in sorted(want_columns[table]):
+                    if column not in present:
+                        missing_cols.append(f"{table}.{column}")
         if missing_tables or missing_cols:
             raise RuntimeError(
                 "SCHEMA_MANAGED_EXTERNALLY=true 인데 스키마가 모자랍니다 — "
