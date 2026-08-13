@@ -92,6 +92,23 @@ class Settings:
     pow_difficulty_bits: int = int(os.getenv("POW_DIFFICULTY_BITS", "17"))
     # 적응형 PoW: 최근 실패/과다요청 세션엔 난이도를 올려 봇 재시도 비용을 계단식 상승.
     pow_stepup_bits: int = int(os.getenv("POW_STEPUP_BITS", "4"))
+    # ── 계속 틀릴 때: 의심 여부로 대응을 나눈다 (2026-08-13)
+    #
+    # 틀림과 의심은 서로 다른 봇을 가리킨다. 틀리는 쪽은 문제를 못 푸는 봇(찍기)이고,
+    # 의심되는 쪽은 문제는 푸는데 궤적이 기계인 봇이다.
+    #
+    #   의심 없음  → 대기 시간. 사람일 가능성이 높으니 CPU·배터리를 태우지 않는다.
+    #   의심 있음  → PoW 상향. 기다리는 건 봇에게 싼 벌이다(그동안 다른 세션을 병렬로
+    #                돌리면 그만) — 계산은 실제로 그 기기가 해야 한다.
+    #
+    # 실측 근거(0812~13): 사람 오답률 12.8% → 3연속 오답 0.2%. 찍는 봇은 오답률 75%
+    # (문항 평균 정답 확률 25%) → 3연속 오답 42%. 3연속 오답은 봇이 200배 잘 낸다.
+    # 그래서 사람 쪽 대기는 4회째부터 시작해 정상 사용자를 거의 건드리지 않는다.
+    pow_max_bits: int = int(os.getenv("POW_MAX_BITS", "24"))
+    # 오답 n회에서 시작하는 대기(초). "4회째 5초, 5회째 20초, 그 뒤 60초 상한".
+    # 상한을 두는 이유 — 무한정 늘리면 결국 잠금과 같아지고, 오탐이 있는 한(특정
+    # 참가자 14.1%) 성실한 사람이 못 들어간다. 맞히면 즉시 0으로 돌아간다.
+    retry_delays: str = os.getenv("RETRY_DELAYS", "4:5;5:20;6:60")
     pow_stepup_failures: int = int(os.getenv("POW_STEPUP_FAILURES", "1"))
     pow_stepup_challenges: int = int(os.getenv("POW_STEPUP_CHALLENGES", "5"))
     # 허니팟: 빈 영역에 심는 투명 함정 히트영역 수(사람은 안 건드림, 열거 봇만 집음).

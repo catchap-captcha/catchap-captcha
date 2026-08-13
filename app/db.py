@@ -507,9 +507,26 @@ class Database:
               WHERE c.session_id=%s AND p.final_verdict='failed' AND p.status='unavailable'
                 AND p.created_at>UTC_TIMESTAMP(6)-INTERVAL 10 MINUTE""", (session_id,))
             session_telemetry_failures_10m=int(cur.fetchone()["n"])
+            # 봇 의심(중간·높음)이 최근에 몇 번 붙었나. 틀린 횟수와 **다른 것**을 가리킨다 —
+            # 틀림은 문제를 못 푸는 쪽(찍는 봇), 의심은 문제는 푸는데 궤적이 기계인 쪽이다.
+            # 그래서 대응도 나뉜다(`create_challenge`).
+            cur.execute("""SELECT COUNT(*) n FROM behavior_shadow_predictions p
+              JOIN captcha_attempts a ON a.id=p.captcha_attempt_id
+              JOIN captcha_challenges_v2 c ON c.id=a.challenge_id
+              WHERE c.session_id=%s AND p.risk_level IN ('medium','high')
+                AND p.created_at>UTC_TIMESTAMP(6)-INTERVAL 10 MINUTE""", (session_id,))
+            session_suspicious_10m=int(cur.fetchone()["n"])
+            # 마지막 오답 시각 — 대기 시간을 재는 기준점.
+            cur.execute("""SELECT MAX(a.created_at) t FROM captcha_attempts a
+              JOIN captcha_challenges_v2 c ON c.id=a.challenge_id
+              WHERE c.session_id=%s AND a.is_correct=0
+                AND a.created_at>UTC_TIMESTAMP(6)-INTERVAL 10 MINUTE""", (session_id,))
+            last_failure_at=cur.fetchone()["t"]
         return {"ip_challenges_1m":ip_challenges_1m,"session_challenges_10m":session_challenges_10m,
                 "session_failures_10m":session_failures_10m,
-                "session_telemetry_failures_10m":session_telemetry_failures_10m}
+                "session_telemetry_failures_10m":session_telemetry_failures_10m,
+                "session_suspicious_10m":session_suspicious_10m,
+                "last_failure_at":last_failure_at}
 
     def challenge_for_verify(self, challenge_id: str) -> dict[str, Any] | None:
         with self.connection(True) as conn, conn.cursor() as cur:

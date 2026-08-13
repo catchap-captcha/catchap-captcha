@@ -718,6 +718,26 @@ def _step_up_tier(session_challenges: int):
     return tiers[min(idx, len(tiers) - 1)]
 
 
+def _retry_delay_seconds(failures: int) -> int:
+    """오답 누적에 따른 대기(초). 설정 형식은 "오답수:초;오답수:초".
+
+    해당하는 것 중 **가장 큰** 문턱을 쓴다. 상한은 설정의 마지막 값이다 — 계속 늘리면
+    잠금과 같아지고, 우리 판정에 오탐이 있는 한 성실한 사람이 못 들어간다.
+    """
+    delay = 0
+    for part in settings.retry_delays.split(";"):
+        piece = part.split(":")
+        if len(piece) != 2:
+            continue
+        try:
+            at, seconds = int(piece[0]), int(piece[1])
+        except ValueError:
+            continue
+        if failures >= at:
+            delay = max(delay, seconds)
+    return delay
+
+
 @app.post("/api/captcha/challenges", status_code=status.HTTP_201_CREATED)
 def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_key: str | None = Header(None)):
     require_header(x_captcha_site_key, settings.site_key, "Invalid site key"); check_origin(request)
@@ -726,6 +746,19 @@ def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_
         raise HTTPException(429,"Too many CAPTCHA requests")
     if pattern["session_telemetry_failures_10m"]>=settings.max_telemetry_failures_10m:
         raise HTTPException(429,"Too many invalid behavior attempts")
+    # 계속 틀리는 세션에 **의심이 없으면** 대기를 요구한다. 사람일 가능성이 높으니
+    # CPU 를 태우는 대신 시간을 쓴다. 의심이 붙은 세션은 여기로 오지 않고 아래에서
+    # PoW 가 올라간다 — 기다리기는 봇에게 싼 벌이라서다(병렬로 돌리면 그만).
+    suspicious = pattern["session_suspicious_10m"] > 0
+    if not suspicious:
+        wait = _retry_delay_seconds(pattern["session_failures_10m"])
+        last = pattern.get("last_failure_at")
+        if wait and last:
+            elapsed = (utcnow() - last).total_seconds()
+            if elapsed < wait:
+                remain = int(wait - elapsed) + 1
+                raise HTTPException(429, "Please wait before retrying",
+                                    headers={"Retry-After": str(remain)})
     tier = _step_up_tier(pattern["session_challenges_10m"])  # None이면 현행(단일 난이도)
     question = (database.active_question(tier[0], tier[1]) or database.active_question()) if tier else database.active_question()
     if not question: raise HTTPException(503, "No approved CAPTCHA questions")
@@ -739,6 +772,18 @@ def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_
         if settings.pow_enabled and (pattern["session_failures_10m"] >= settings.pow_stepup_failures
                                      or pattern["session_challenges_10m"] >= settings.pow_stepup_challenges):
             pow_bits += settings.pow_stepup_bits
+        # 의심(중간·높음)이 붙은 채로 세 번 넘게 틀리면 상한까지 올린다.
+        #
+        #   17비트  0.03초   평소
+        #   21비트  0.4초    한 번 틀림 (위 기존 규칙)
+        #   24비트  3.2초    의심 + 3회 이상
+        #
+        # 비트 하나가 비용 2배라 17 -> 24 는 128배다. 상한을 두는 이유는 사람도 틀리기
+        # 때문이다(실측 오답률 12.8%) — 3초는 기다리면 들어갈 수 있는 값이고, 더 올리면
+        # 오탐(특정 참가자 14.1%)을 맞은 사람이 사실상 잠긴다.
+        if settings.pow_enabled and suspicious and pattern["session_failures_10m"] >= 3:
+            pow_bits = settings.pow_max_bits
+        pow_bits = min(pow_bits, settings.pow_max_bits)
     rng = secrets.SystemRandom()
     mappings = [(obj["id"], f"tmp_{secrets.token_urlsafe(8)}") for obj in question["objects"] if obj["role"] != "invalid"]
     temporary = {object_id: temp for object_id, temp in mappings}
