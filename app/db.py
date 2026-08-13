@@ -12,6 +12,8 @@ from typing import Any, Iterator
 import pymysql
 from pymysql.cursors import DictCursor
 
+from .cache import Cache, compare_and_log
+from .cache import KEY_SHAPE as _KEY_SHAPE
 from .config import Settings
 
 
@@ -257,9 +259,15 @@ def _validate_behavior_batches(
     return events, None
 
 
+# ★캐시가 세는 카운터 — request_pattern 의 반환값 중 이 넷만 캐시로 대체된다.
+CACHED_COUNTERS = tuple(_KEY_SHAPE)
+
+
 class Database:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        # ★캐시는 '있으면 쓰는 것'이다. 없거나 죽어도 아래 질의가 그대로 돈다.
+        self.cache = Cache(settings)
 
     def _connect(self, autocommit: bool = False) -> pymysql.Connection:
         kwargs: dict[str, Any] = dict(
@@ -487,6 +495,9 @@ class Database:
                 (challenge["id"], hashlib.sha256(behavior_nonce.encode("utf-8")).hexdigest(), challenge["created_at"]),
             )
             conn.commit()
+        # ★커밋 뒤에 센다 — 캐시가 실패해도 DB 는 이미 끝나 있다.
+        self.cache.bump("ip_challenges_1m", challenge.get("client_ip_hash") or "")
+        self.cache.bump("session_challenges_10m", challenge.get("session_id") or "")
 
     def request_pattern(self, session_id: str, client_ip_hash: str) -> dict[str, int]:
         with self.connection(True) as conn, conn.cursor() as cur:
@@ -522,11 +533,31 @@ class Database:
               WHERE c.session_id=%s AND a.is_correct=0
                 AND a.created_at>UTC_TIMESTAMP(6)-INTERVAL 10 MINUTE""", (session_id,))
             last_failure_at=cur.fetchone()["t"]
-        return {"ip_challenges_1m":ip_challenges_1m,"session_challenges_10m":session_challenges_10m,
-                "session_failures_10m":session_failures_10m,
-                "session_telemetry_failures_10m":session_telemetry_failures_10m,
-                "session_suspicious_10m":session_suspicious_10m,
-                "last_failure_at":last_failure_at}
+        db_values = {"ip_challenges_1m":ip_challenges_1m,"session_challenges_10m":session_challenges_10m,
+                     "session_failures_10m":session_failures_10m,
+                     "session_telemetry_failures_10m":session_telemetry_failures_10m,
+                     "session_suspicious_10m":session_suspicious_10m,
+                     "last_failure_at":last_failure_at}
+        # ★1단계 — 캐시에도 같은 것을 세어 두고 ★값이 다를 때만 로그로 남긴다.
+        #   판정은 여전히 DB 값으로 한다. 캐시가 죽어도 아무 일도 안 일어난다.
+        #
+        # ⚠️캐시가 세는 것은 ★아래 넷뿐이다.
+        #     session_suspicious_10m  은 캐시로 안 센다 (봇 의심 판정이 필요하다)
+        #     last_failure_at         은 ★날짜라 카운터로 못 센다
+        #   그래서 비교도, 갈아끼우기도 ★이 넷만 한다. 통째로 바꾸면 위 둘이
+        #   사라져 main.py 가 KeyError 로 터진다.
+        if self.cache.enabled:
+            cache_values = self.cache.read({
+                "ip_challenges_1m": client_ip_hash,
+                "session_challenges_10m": session_id,
+                "session_failures_10m": session_id,
+                "session_telemetry_failures_10m": session_id,
+            })
+            counted = {k: db_values[k] for k in CACHED_COUNTERS}
+            compare_and_log(counted, cache_values)
+            if self.settings.valkey_rate_limit_mode == "cache" and cache_values is not None:
+                return {**db_values, **cache_values}      # ★덮어쓰기 — 지우지 않는다
+        return db_values
 
     def challenge_for_verify(self, challenge_id: str) -> dict[str, Any] | None:
         with self.connection(True) as conn, conn.cursor() as cur:
@@ -669,7 +700,17 @@ class Database:
               summary["path_length"],summary["path_curvature"],summary["pause_count"]))
             cur.execute("UPDATE captcha_challenges_v2 SET attempt_count=attempt_count+1,status=%s,verified_at=%s WHERE id=%s",
                         ("passed" if correct else "failed", utcnow() if correct else None, challenge_id))
-            conn.commit(); return int(attempt_id)
+            # ★세션 실패 카운터는 session_id 로 세는데 여기에는 challenge_id 밖에 없다.
+            #   이미 열려 있는 커서로 한 번만 더 읽는다 — 연결을 새로 열지 않는다.
+            session_id = ""
+            if not correct and self.cache.enabled:
+                cur.execute("SELECT session_id FROM captcha_challenges_v2 WHERE id=%s", (challenge_id,))
+                row = cur.fetchone()
+                session_id = (row or {}).get("session_id") or ""
+            conn.commit()
+        if session_id:
+            self.cache.bump("session_failures_10m", session_id)
+        return int(attempt_id)
 
     def record_behavior_shadow_prediction(
         self,
