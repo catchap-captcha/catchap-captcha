@@ -317,3 +317,20 @@ def test_policy_mismatch_does_not_enforce():
     verdict, action = resolve_final_verdict(
         captcha_correct=True, prediction=scored_shadow, local_policy_mode="active")
     assert (verdict, action) == ("passed", None)
+
+
+def test_retry_delay_ladder():
+    """오답 누적에 따른 대기 — 4회째 5초, 5회째 20초, 그 뒤 60초 상한.
+
+    3회까지 대기가 없는 것이 핵심이다. 사람 오답률이 12.8% 라 3연속 오답이 0.2% 로
+    드물지만 반드시 일어나고, 그때 기다리게 하면 성실한 사용자만 벌하게 된다.
+    상한을 두는 이유도 같다 — 무한정 늘리면 잠금과 같아진다.
+    """
+    from app.main import _retry_delay_seconds
+
+    assert [_retry_delay_seconds(n) for n in range(0, 4)] == [0, 0, 0, 0]
+    assert _retry_delay_seconds(4) == 5
+    assert _retry_delay_seconds(5) == 20
+    assert _retry_delay_seconds(6) == 60
+    # 상한 — 20회를 틀려도 60초를 넘지 않는다.
+    assert _retry_delay_seconds(20) == 60
