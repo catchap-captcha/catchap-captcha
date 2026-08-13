@@ -750,6 +750,22 @@ def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_
     # CPU 를 태우는 대신 시간을 쓴다. 의심이 붙은 세션은 여기로 오지 않고 아래에서
     # PoW 가 올라간다 — 기다리기는 봇에게 싼 벌이라서다(병렬로 돌리면 그만).
     suspicious = pattern["session_suspicious_10m"] > 0
+    if suspicious and pattern["session_failures_10m"] >= settings.suspicious_block_failures:
+        # 의심이 붙은 채로 계속 틀리면 잠시 막는다. 세션 ID 는 브라우저가 만드는 값이라
+        # 새로 만들면 풀린다 — 그래도 그냥 다시 시도하는 부류는 여기서 멈춘다(config 주석).
+        #
+        # ★시간 제한을 둔다. 우리 판정은 틀리고(특정 참가자 오탐 14.1%), 영구 차단이면
+        # 그 사람이 로그인을 못 한다. 마지막 오답에서 이 시간이 지나면 저절로 풀린다.
+        last = pattern.get("last_failure_at")
+        if last:
+            elapsed = (utcnow() - last).total_seconds()
+            if elapsed < settings.suspicious_block_seconds:
+                remain = int(settings.suspicious_block_seconds - elapsed) + 1
+                # 대기와 차단은 사용자가 겪는 일이 다르다. 프론트가 화면을 다르게
+                # 그릴 수 있게 사유를 실어 보낸다("잠시 기다리세요" vs "차단됐습니다").
+                raise HTTPException(429, "Temporarily blocked",
+                                    headers={"Retry-After": str(remain),
+                                             "X-Captcha-Retry-Reason": "blocked"})
     if not suspicious:
         wait = _retry_delay_seconds(pattern["session_failures_10m"])
         last = pattern.get("last_failure_at")
@@ -758,7 +774,8 @@ def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_
             if elapsed < wait:
                 remain = int(wait - elapsed) + 1
                 raise HTTPException(429, "Please wait before retrying",
-                                    headers={"Retry-After": str(remain)})
+                                    headers={"Retry-After": str(remain),
+                                             "X-Captcha-Retry-Reason": "wait"})
     tier = _step_up_tier(pattern["session_challenges_10m"])  # None이면 현행(단일 난이도)
     question = (database.active_question(tier[0], tier[1]) or database.active_question()) if tier else database.active_question()
     if not question: raise HTTPException(503, "No approved CAPTCHA questions")

@@ -334,3 +334,22 @@ def test_retry_delay_ladder():
     assert _retry_delay_seconds(6) == 60
     # 상한 — 20회를 틀려도 60초를 넘지 않는다.
     assert _retry_delay_seconds(20) == 60
+
+
+def test_suspicious_block_is_time_limited():
+    """의심 세션 차단은 **시간 제한**이 있어야 한다.
+
+    우리 판정은 틀린다(특정 참가자 오탐 14.1%). 영구 차단이면 그 사람이 로그인을
+    못 한다. 마지막 오답에서 일정 시간이 지나면 저절로 풀려야 한다.
+
+    또 하나 — 차단 문턱이 대기 사다리보다 뒤에 있어야 한다. 앞이면 대기 단계를
+    건너뛰고 바로 막히므로, 사람이 겪을 수 있는 완만한 단계가 사라진다.
+    """
+    from app.config import settings
+    from app.main import _retry_delay_seconds
+
+    assert settings.suspicious_block_seconds > 0, "영구 차단이면 안 된다"
+    assert settings.suspicious_block_seconds <= 900, "너무 길면 잠금과 같다"
+    # 대기가 시작되는 오답 수(4회)보다 차단이 뒤여야 한다.
+    first_delay_at = min(n for n in range(1, 20) if _retry_delay_seconds(n) > 0)
+    assert settings.suspicious_block_failures > first_delay_at

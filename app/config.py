@@ -109,6 +109,22 @@ class Settings:
     # 상한을 두는 이유 — 무한정 늘리면 결국 잠금과 같아지고, 오탐이 있는 한(특정
     # 참가자 14.1%) 성실한 사람이 못 들어간다. 맞히면 즉시 0으로 돌아간다.
     retry_delays: str = os.getenv("RETRY_DELAYS", "4:5;5:20;6:60")
+    # ── 의심 세션이 계속 틀릴 때: 잠시 막는다 (2026-08-13, sw 요청)
+    #
+    # 의심(medium/high)이 붙은 채로 이 횟수만큼 틀리면 새 문제를 안 준다.
+    #
+    # ⚠️정직하게 — 이 차단은 세션 단위이고, 세션 ID 는 브라우저가 직접 만든다
+    #   (`guard-<시각>-<난수>`). 새로 만들면 풀린다. 즉 제대로 만든 봇은 안 걸리고
+    #   그냥 다시 시도하는 부류만 걸린다. IP 로 걸면 같은 공유기를 쓰는 사람이 전부
+    #   걸리므로 그쪽이 더 나쁘다.
+    #
+    #   비용 부담은 PoW 가 진짜로 진다 — 세션을 바꿔도 계산은 다시 해야 한다.
+    #   이 차단은 그 위에 얹는 값싼 한 겹이다.
+    #
+    # ★시간 제한을 두는 이유 — 우리 판정은 틀린다(특정 참가자 오탐 14.1%). 영구
+    #   차단이면 그 사람이 로그인을 못 한다. 기다리면 풀리게 둔다.
+    suspicious_block_failures: int = int(os.getenv("SUSPICIOUS_BLOCK_FAILURES", "5"))
+    suspicious_block_seconds: int = int(os.getenv("SUSPICIOUS_BLOCK_SECONDS", "300"))
     pow_stepup_failures: int = int(os.getenv("POW_STEPUP_FAILURES", "1"))
     pow_stepup_challenges: int = int(os.getenv("POW_STEPUP_CHALLENGES", "5"))
     # 허니팟: 빈 영역에 심는 투명 함정 히트영역 수(사람은 안 건드림, 열거 봇만 집음).
