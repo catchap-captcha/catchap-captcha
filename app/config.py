@@ -129,6 +129,12 @@ class Settings:
     pow_stepup_challenges: int = int(os.getenv("POW_STEPUP_CHALLENGES", "5"))
     # 허니팟: 빈 영역에 심는 투명 함정 히트영역 수(사람은 안 건드림, 열거 봇만 집음).
     honeypot_count: int = int(os.getenv("HONEYPOT_COUNT", "1"))
+    # 한 문항에서 **서로 다른** 함정 미리보기를 이만큼 받아가면 자동화로 본다.
+    #
+    # 화면은 객체를 집었을 때만 미리보기를 받으므로, 하나는 "실수로 함정을 집었다"
+    # 일 수 있다(그건 어차피 제출 때 걸린다). 둘 이상은 집은 게 아니라 훑은 것이다 —
+    # 사람은 안 보이는 덫을 두 개나 집을 수 없다. 그래서 기본이 2 다.
+    honeypot_probe_block: int = int(os.getenv("HONEYPOT_PROBE_BLOCK", "2"))
     # step-up 계층(sw 요청): 의심 세션에 다음 챌린지를 어렵게(객체 수·PoW 비트·허니팟 상향).
     # ⚠️ 기본 OFF — AI 채점이 드래그 단위로 바뀌기 전 켜면 '규모 클수록 사람 판정'이라 제일 의심스러운
     #    세션에 제일 관대해짐(sw 지적). per-drag 채점(sw 4094fbf)과 함께 켠다.

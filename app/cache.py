@@ -48,6 +48,16 @@ KEY_SHAPE = {
     "session_telemetry_failures_10m": "rl:tele:{v}:10m",
 }
 
+# ★함정 훑기는 위 둘에 ★안 넣는다.
+#
+#   위 표는 레이트리밋 **카운터** 목록이고, `db.CACHED_COUNTERS` 가 그대로 가져다
+#   DB 값과 비교한다(1단계). 그런데 이건 카운터가 아니라 **집합**이라 MGET 으로 읽으면
+#   타입이 안 맞아 실패하고, 그 한 번으로 카운터 비교가 통째로 죽는다.
+#   (2026-08-13, `test_캐시가_세지_않는_항목은_비교에서_빠진다` 가 잡아냈다)
+HONEYPOT_PROBE_KEY = "hp:{v}"
+# 문항 하나가 사는 시간보다 넉넉히 — 발급 직후 훑고 한참 뒤에 제출해도 남아 있게.
+HONEYPOT_PROBE_WINDOW = 900
+
 
 class Cache:
     """Valkey 연결 하나를 감싼다. ★어떤 오류도 밖으로 던지지 않는다."""
@@ -154,6 +164,45 @@ class Cache:
         except Exception as exc:
             self._warn_once("bump", f"카운터 증가 실패 — DB 로만 셉니다: {exc}")
             self.drop()
+
+    # ── 함정 훑기 ───────────────────────────────────────────────────
+    def _probe_key(self, challenge_id: str) -> str:
+        return self.settings.valkey_key_prefix + HONEYPOT_PROBE_KEY.format(v=challenge_id)
+
+    def mark_honeypot_probe(self, challenge_id: str, asset_id: str) -> None:
+        """이 문항에서 함정 미리보기를 받아갔다고 적어 둔다.
+
+        화면은 객체를 **집었을 때만** 미리보기를 받는다. 그러니 이 요청은 곧 "함정을
+        집었다" 는 뜻이고, 그것만으로도 봇 신호다. 서로 다른 함정을 여럿 받아갔다면
+        집은 게 아니라 **훑은** 것이다 — 사람은 안 보이는 덫을 여러 개 집을 수 없다.
+
+        ★실패해도 조용히 넘어간다. 이건 탐지 신호지 관문이 아니다 — 캐시가 죽었다고
+          사람이 캡차를 못 푸는 일이 생기면 안 된다.
+        """
+        client = self._get()
+        if client is None or not challenge_id or not asset_id:
+            return
+        try:
+            key = self._probe_key(challenge_id)
+            pipe = client.pipeline()
+            pipe.sadd(key, asset_id)
+            pipe.expire(key, HONEYPOT_PROBE_WINDOW, nx=True)
+            pipe.execute()
+        except Exception as exc:
+            self._warn_once("probe", f"함정 훑기 기록 실패 — 이 신호는 건너뜁니다: {exc}")
+            self.drop()
+
+    def honeypot_probe_count(self, challenge_id: str) -> int:
+        """이 문항에서 받아간 **서로 다른** 함정 미리보기 수. 모르면 0(=신호 없음)."""
+        client = self._get()
+        if client is None or not challenge_id:
+            return 0
+        try:
+            return int(client.scard(self._probe_key(challenge_id)) or 0)
+        except Exception as exc:
+            self._warn_once("probe_read", f"함정 훑기 읽기 실패 — 이 신호는 건너뜁니다: {exc}")
+            self.drop()
+            return 0
 
     def read(self, names_values: dict[str, str]) -> dict[str, int] | None:
         """여러 카운터를 한 번에 읽는다. ★하나라도 실패하면 None(=DB 를 쓰라)."""
