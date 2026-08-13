@@ -745,6 +745,36 @@ class Database:
             )
             conn.commit()
 
+    def purge_expired_tokens(self, *, limit: int | None = None, max_batches: int = 50) -> int:
+        """만료된 토큰을 지운다. 지운 행수를 돌려준다.
+
+        ★왜 이것만 지우나 — `captcha_tokens` 를 참조하는 표가 ★하나도 없다.
+          그래서 이 삭제는 아무것도 딸려 가지 않는다. 반대로 부모인
+          `captcha_challenges_v2` 를 지우면 CASCADE 로 행동 데이터까지 사라진다.
+          (0813 성원님 판단 — 부모는 그대로 두고 필요하면 자식을 직접 지운다)
+
+        ★한 번에 다 지우지 않고 나눠 지운다. 큰 DELETE 는 잠금을 오래 잡아
+        그동안 토큰 발급이 밀린다.
+
+        ⚠️`expires_at` 에 색인이 없다. 지금 크기(3천 행)에서는 훑어도 금방이고,
+          이 정리가 돌면 표가 계속 작게 유지된다. 색인은 DDL 이라 앱 계정으로
+          만들 수 없다(0810 회수) — 표가 커지면 catchap_dba 로 넣는다.
+        """
+        batch = limit or self.settings.token_purge_batch
+        지운수 = 0
+        for _ in range(max_batches):
+            with self.connection() as conn, conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM captcha_tokens "
+                    "WHERE expires_at < UTC_TIMESTAMP(6) - INTERVAL %s HOUR LIMIT %s",
+                    (self.settings.token_retention_hours, batch))
+                n = cur.rowcount
+                conn.commit()
+            지운수 += n
+            if n < batch:          # 더 지울 것이 없다
+                break
+        return 지운수
+
     def create_token(self, challenge_id: str, token_hash: str, purpose: str, session_id: str,
                      expires_at: datetime, lecture_id: str | None = None) -> None:
         with self.connection() as conn, conn.cursor() as cur:
