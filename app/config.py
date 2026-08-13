@@ -139,6 +139,14 @@ class Settings:
     # active 승격 go/no-go 기준: 사람 프록시(정답 통과) 표본 최소치 + 허용 오탐 프록시율.
     behavior_promote_min_passed: int = int(os.getenv("BEHAVIOR_PROMOTE_MIN_PASSED", "500"))
     behavior_promote_max_fp_rate: float = float(os.getenv("BEHAVIOR_PROMOTE_MAX_FP_RATE", "0.02"))
+    # ── 만료 토큰 정리 ──────────────────────────────────────────────
+    # 토큰 수명은 몇 분인데 지우는 곳이 없어 만료된 것이 그대로 쌓인다
+    # (0813 기준 2,991행 · 전부 만료). ★참조하는 표가 없어 지워도 안전하다.
+    # 여유를 두는 이유 — 서버 시계가 조금 어긋나도 살아 있는 토큰을 안 건드리게.
+    token_retention_hours: int = int(os.getenv("CAPTCHA_TOKEN_RETENTION_HOURS", "24"))
+    # 한 번에 지우는 최대 행수. 크게 잡으면 잠금이 길어진다.
+    token_purge_batch: int = int(os.getenv("CAPTCHA_TOKEN_PURGE_BATCH", "1000"))
+
     # ── Valkey(캐시) ────────────────────────────────────────────────
     # ★기본값은 전부 "안 쓴다" 이다. VALKEY_HOST 가 비어 있으면 코드가 캐시를
     #   아예 건드리지 않고 지금까지처럼 DB 만 쓴다 — 로컬 개발·시험이 그대로 돈다.
