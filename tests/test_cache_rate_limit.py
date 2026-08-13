@@ -119,3 +119,33 @@ def test_비교로그는_다를_때만_남긴다(caplog):
 
 def test_캐시가_없어도_비교로그가_안_터진다():
     compare_and_log({"a": 1}, None)      # 예외가 나면 안 된다
+
+
+def test_연결이_실패하면_쉬었다가_다시_시도한다(monkeypatch):
+    """★캐시가 죽었을 때 요청마다 연결을 다시 걸면 캐시 없을 때보다 느려진다.
+
+    연결 제한시간 0.3초 × 카운터 3개 = 챌린지마다 최대 0.9초가 더 붙는다.
+    그래서 실패하면 잠시 쉬고, 쉬는 동안에는 조용히 DB 로 간다.
+    """
+    시도 = []
+
+    c = Cache(_settings(valkey_host="valkey.example", valkey_retry_seconds=60))
+
+    def 실패하는연결():
+        시도.append(1)
+        return None
+
+    monkeypatch.setattr(c, "_connect", 실패하는연결)
+    for _ in range(5):
+        c.bump("ip_challenges_1m", "ip-1")
+        c.read({"ip_challenges_1m": "ip-1"})
+    assert len(시도) == 1, f"★쉬지 않고 매번 다시 붙으려 한다 ({len(시도)}번)"
+
+
+def test_쓰다가_실패하면_연결을_버린다(monkeypatch):
+    """죽은 연결을 그대로 들고 있으면 계속 같은 오류를 낸다."""
+    client = 가짜클라이언트(터짐=True)
+    c = _cache(monkeypatch, client, valkey_retry_seconds=60)
+    assert c._get() is client
+    c.read({"ip_challenges_1m": "ip-1"})
+    assert c._client is None, "★실패한 연결을 그대로 들고 있다"
