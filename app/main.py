@@ -629,7 +629,18 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="CatChap Object Drag CAPTCHA", version="2.0.0", docs_url="/docs", lifespan=lifespan)
 app.add_middleware(CORSMiddleware, allow_origins=list(settings.allowed_origins), allow_credentials=False,
-                   allow_methods=["GET", "POST", "PUT", "OPTIONS"], allow_headers=["*"])
+                   allow_methods=["GET", "POST", "PUT", "OPTIONS"], allow_headers=["*"],
+                   # ★이게 없으면 429 의 두 헤더를 브라우저가 **못 읽는다.**
+                   #
+                   # 화면은 www 에서 돌고 우리는 captcha 도메인이라 출처가 다르다. 다른 출처의
+                   # 응답에서 JS 가 읽을 수 있는 헤더는 몇 개로 정해져 있고, 나머지는 여기에
+                   # 적어야 열린다. 안 열면 `res.headers.get(...)` 이 조용히 null 을 준다.
+                   #
+                   # 그 결과가 고약하다 — 프론트가 기본값으로 떨어져 **차단이 전부 "5초 뒤에
+                   # 다시 시도하세요" 로 그려진다.** 서버는 300초 blocked 를 보내는데 사용자는
+                   # 잠깐 기다리면 되는 줄 안다(2026-08-13 실측: 응답은 `Retry-After=272 ·
+                   # blocked`, 화면은 "2초 뒤에 다시 시도할 수 있습니다").
+                   expose_headers=["Retry-After", "X-Captcha-Retry-Reason"])
 
 # IP당 분당 요청 상한 — 대량요청 봇(다운로드/크롤러/API 플러드/애플리케이션 홍수) 차단.
 _rate_hits: dict[str, deque] = {}
