@@ -451,6 +451,9 @@ class Database:
         """회전 출제: 노출 적은 문항 우선 + 쿨다운(방금 나온 문항 제외). 출제 시 노출 카운트 증가.
         min_obj/max_obj 지정 시 실객체(invalid 제외) 수가 그 범위인 문항만(step-up 계층용)."""
         cooldown = self.settings.rotation_cooldown_seconds
+        # ★노출 적은 것부터 **정확히** 내보내면 훑는 쪽에 중복 없는 안내 투어가 된다.
+        #   섞어서 같은 문항이 다시 나오게 한다 — 자세한 근거는 `config.rotation_jitter`.
+        jitter = max(1, int(self.settings.rotation_jitter))
         # 실객체 수 범위 필터(step-up). 없으면 전체.
         oc_join = (" JOIN (SELECT question_id, SUM(role<>'invalid') oc FROM captcha_objects GROUP BY question_id) c"
                    " ON c.question_id=q.id AND c.oc BETWEEN %s AND %s") if min_obj is not None else ""
@@ -459,12 +462,13 @@ class Database:
             cur.execute(f"""SELECT q.* FROM captcha_questions q{oc_join}
               WHERE q.status='active' AND q.review_status='approved'
                 AND (q.last_served_at IS NULL OR q.last_served_at < UTC_TIMESTAMP(6) - INTERVAL %s SECOND)
-              ORDER BY q.served_count ASC, RAND() LIMIT 1""", (*oc_args, cooldown))
+              ORDER BY q.served_count + RAND() * %s ASC LIMIT 1""",
+                        (*oc_args, cooldown, jitter))
             question = cur.fetchone()
             if not question:  # 전부 쿨다운 중(풀이 작을 때)이면 쿨다운 무시
                 cur.execute(f"""SELECT q.* FROM captcha_questions q{oc_join}
                   WHERE q.status='active' AND q.review_status='approved'
-                  ORDER BY q.served_count ASC, RAND() LIMIT 1""", oc_args)
+                  ORDER BY q.served_count + RAND() * %s ASC LIMIT 1""", (*oc_args, jitter))
                 question = cur.fetchone()
             if not question: conn.commit(); return None
             cur.execute("UPDATE captcha_questions SET served_count=served_count+1, last_served_at=UTC_TIMESTAMP(6) WHERE id=%s", (question["id"],))
