@@ -745,6 +745,10 @@ def ready():
     )
     return {
         "status": "ok" if service_ready else "error",
+        # ★어느 커밋이 떠 있는가. 배포가 파드까지 닿았는지 **바깥에서 한 번에** 알 수
+        #   있어야 한다. 이게 없어서 2026-08-14 에 "배포가 안 됐다" 로 2시간을 오진했다
+        #   — 실제로는 배포됐고 코드가 안 듣는 것이었다.
+        "version": settings.git_sha,
         "database_ready": database_ready,
         "approved_questions": approved_questions,
         "behavior_policy_mode": settings.behavior_policy_mode,

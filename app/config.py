@@ -88,6 +88,9 @@ class Settings:
     cluster_block_size: int = int(os.getenv("CLUSTER_BLOCK_SIZE", "7"))
     cluster_window_hours: int = int(os.getenv("CLUSTER_WINDOW_HOURS", "24"))
     rotation_cooldown_seconds: int = int(os.getenv("ROTATION_COOLDOWN_SECONDS", "1800"))
+    # 이미지를 만든 커밋. Dockerfile 이 빌드할 때 심는다(`ARG GIT_SHA`).
+    # 로컬 실행처럼 안 심긴 경우는 "unknown" 이고, 그것도 유용한 답이다.
+    git_sha: str = os.getenv("GIT_SHA", "unknown")
 
     pow_enabled: bool = os.getenv("POW_ENABLED", "1") == "1"
     pow_difficulty_bits: int = int(os.getenv("POW_DIFFICULTY_BITS", "17"))
