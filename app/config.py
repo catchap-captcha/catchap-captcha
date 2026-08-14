@@ -88,18 +88,7 @@ class Settings:
     cluster_block_size: int = int(os.getenv("CLUSTER_BLOCK_SIZE", "7"))
     cluster_window_hours: int = int(os.getenv("CLUSTER_WINDOW_HOURS", "24"))
     rotation_cooldown_seconds: int = int(os.getenv("ROTATION_COOLDOWN_SECONDS", "1800"))
-    # 출제 순서에 섞는 폭. 노출 횟수가 이만큼 차이 나도 서로 앞뒤가 바뀔 수 있다.
-    #
-    # ★0 이면 노출 적은 것부터 **정확히** 나가서, 훑는 쪽에 중복 없는 안내 투어가 된다.
-    #   2026-08-14 실측 — 활성 문항 2,003개의 노출 횟수가 전부 3~4회로 붙어 있었다.
-    #   IP 하나가 분당 30개를 받으면 **67분**이면 은행을 한 바퀴 다 본다.
-    #
-    #   섞으면 같은 문항이 다시 나오므로(쿠폰 수집가 문제) 한 바퀴에 2,003번이 아니라
-    #   약 16,400번이 든다 — 같은 상한에서 67분이 **9시간**이 된다.
-    #
-    #   폭을 너무 키우면 특정 문항이 오래 안 나가 노출이 벌어진다. 25 는 현재 노출
-    #   편차(1회)보다 훨씬 크면서, 장기적으로는 여전히 적게 나온 쪽을 당겨 온다.
-    rotation_jitter: int = int(os.getenv("ROTATION_JITTER", "25"))
+
     pow_enabled: bool = os.getenv("POW_ENABLED", "1") == "1"
     pow_difficulty_bits: int = int(os.getenv("POW_DIFFICULTY_BITS", "17"))
     # 적응형 PoW: 최근 실패/과다요청 세션엔 난이도를 올려 봇 재시도 비용을 계단식 상승.
