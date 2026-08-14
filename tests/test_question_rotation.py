@@ -6,20 +6,23 @@
 실측(운영, 2026-08-14):
 
     활성 문항        2,003개
-    노출 횟수        전부 3~4회      ← 균등하다는 증거이자, 훑기가 끝났다는 증거
+    노출 횟수        전부 3~4회
     IP당 발급 상한   분당 30개
     → 2,003 / 30 = 약 67분이면 IP 하나로 은행을 한 바퀴 다 본다
 
-섞으면 같은 문항이 다시 나오므로(쿠폰 수집가 문제) 한 바퀴에 약 16,400번이 들고,
-같은 상한에서 67분이 **9시간**이 된다.
+★한 번 틀린 방법을 여기 남겨 둔다 — `served_count + RAND()*폭` 은 **효과가 없다.**
+2,003행 중 최솟값 하나를 뽑는데, 노출 적은 무리가 크면 그 안에서 아주 작은 난수가
+반드시 나오기 때문이다(3회 무리 533개의 최솟값 ≈ 3.047 vs 4회 무리의 ≈ 4.017 →
+적은 무리가 100% 승리). 폭을 2000으로 키워도 43% 다.
 
-문항을 다 받아가면 지시문과 조각 그림이 같이 딸려 오므로 정답까지 라벨링할 수 있다.
-그러면 "무엇을 풀었는가" 는 방어선이 아니게 된다 — 행동 판별이 남는 이유다.
+지금은 지수 경주로 뽑는다 — `-LOG(1-RAND()) * (노출+1)` 의 최솟값. 뽑힐 확률이
+`1/(노출+1)` 에 비례해서 적게 나온 쪽이 유리하되 많이 나온 쪽도 나온다.
 """
 
 from __future__ import annotations
 
-import pytest
+import math
+import random
 
 from app.config import settings
 from app.db import Database
@@ -58,38 +61,48 @@ class _FakeConnection:
     def __exit__(self, *exc): return False
 
 
-def _pick() -> _FakeCursor:
+def _selects() -> list[str]:
     cursor = _FakeCursor()
     database = Database.__new__(Database)
     database.settings = settings
     database.connection = lambda *a, **k: _FakeConnection(cursor)  # type: ignore[method-assign]
     database.active_question()
-    return cursor
-
-
-def _selects(cursor: _FakeCursor) -> list[str]:
     return [sql for sql, _ in cursor.statements if "from captcha_questions" in sql.lower()]
+
+
+def _flat(sql: str) -> str:
+    return " ".join(sql.lower().split())
 
 
 def test_출제_순서가_노출순으로_고정되지_않는다():
     """★고정이면 훑는 쪽이 중복 없이 은행을 한 바퀴 받아간다."""
-    for sql in _selects(_pick()):
-        assert "served_count asc" not in " ".join(sql.lower().split())
+    for sql in _selects():
+        assert "order by q.served_count asc" not in _flat(sql)
 
 
-def test_출제_순서에_무작위가_섞인다():
-    selects = _selects(_pick())
+def test_노출이_더하기가_아니라_곱으로_들어간다():
+    """★`served_count + RAND()*폭` 은 효과가 없다(무리가 크면 적은 쪽이 100% 이긴다).
+
+    가중치로 곱해야 무리를 넘나든다.
+    """
+    selects = _selects()
     assert selects, "문항 고르는 질의가 안 나갔습니다"
     for sql in selects:
-        assert "rand()" in sql.lower()
+        flat = _flat(sql)
+        assert "log(1 - rand())" in flat
+        assert "* (q.served_count + 1)" in flat
 
 
-def test_노출_적은_쪽을_여전히_당겨온다():
-    """무작위만 쓰면 어떤 문항은 오래 안 나간다. 노출 횟수가 순서에 남아 있어야 한다."""
-    for sql in _selects(_pick()):
-        assert "served_count" in sql.lower()
+def test_노출_적은_쪽이_여전히_유리하다():
+    """무작위로 바꾸면서 공평함을 잃으면 안 된다 — 뽑힐 확률이 1/(노출+1) 에 비례한다.
 
-
-def test_섞는_폭이_현재_노출_편차보다_크다():
-    """폭이 편차(1회)보다 작으면 사실상 고정된 순서와 같아진다."""
-    assert settings.rotation_jitter >= 5
+    SQL 과 같은 규칙을 파이썬으로 돌려 확인한다. 적게 나온 무리(533개, 3회)가
+    많이 나온 무리(1,470개, 4회)보다 **머릿수 비율보다 더 자주** 뽑혀야 한다.
+    """
+    random.seed(20260814)
+    low_n, high_n, trials = 533, 1470, 4000
+    def race(count, n):
+        return min(-math.log(1 - random.random()) * (count + 1) for _ in range(n))
+    wins = sum(1 for _ in range(trials) if race(3, low_n) < race(4, high_n))
+    share = low_n / (low_n + high_n)          # 머릿수만 보면 26.6%
+    assert share < wins / trials < 0.60       # 유리하되 독식하지는 않는다

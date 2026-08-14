@@ -448,12 +448,27 @@ class Database:
             return cur.fetchone() is not None
 
     def active_question(self, min_obj: int | None = None, max_obj: int | None = None) -> dict[str, Any] | None:
-        """회전 출제: 노출 적은 문항 우선 + 쿨다운(방금 나온 문항 제외). 출제 시 노출 카운트 증가.
+        """회전 출제: **뽑힐 확률이 1/(노출+1) 에 비례하는 가중 무작위** + 쿨다운.
+
+        ★왜 노출순 정렬이 아닌가 — `ORDER BY served_count ASC` 는 공평하지만, 문항을
+          받아가려는 쪽에는 **중복 없는 목록을 순서대로 내주는 것**과 같다. 한 번 받은
+          문항은 노출이 올라가 뒤로 밀리므로 다음에는 반드시 안 본 문항이 나온다.
+          2026-08-14 실측 — 활성 문항 2,003개의 노출이 전부 3~4회로 붙어 있었고,
+          IP 하나가 분당 30개를 받으면 **67분**이면 은행을 한 바퀴 다 본다.
+
+        ★`served_count + RAND()*폭` 은 **효과가 없다.** 2,003행 중 **최솟값 하나**를
+          뽑는데, 노출 적은 무리가 크면 그 안에서 아주 작은 난수가 반드시 나온다.
+          실측(0814): 3회 무리 533개의 최솟값 ≈ 3.047, 4회 무리 1,470개는 ≈ 4.017 이라
+          적은 무리가 **100%** 이긴다. 폭을 25에서 2000으로 키워도 43% 다.
+          (한 번 그렇게 넣었다가 되돌렸다 — catchap-captcha#41)
+
+        ★지수 경주로 뽑는다. `-LOG(1-RAND()) * (노출+1)` 의 최솟값을 고르면 뽑힐 확률이
+          `1/(노출+1)` 에 비례한다. 적게 나온 쪽이 유리하되 많이 나온 쪽도 나온다.
+          모의 실험(2,003문항·40,000회): 노출 편차 2.78(완전 무작위 4.38보다 작다),
+          한 바퀴 10,814회(지금 2,003회의 5.4배 = 분당 30개면 67분에서 약 6시간).
+
         min_obj/max_obj 지정 시 실객체(invalid 제외) 수가 그 범위인 문항만(step-up 계층용)."""
         cooldown = self.settings.rotation_cooldown_seconds
-        # ★노출 적은 것부터 **정확히** 내보내면 훑는 쪽에 중복 없는 안내 투어가 된다.
-        #   섞어서 같은 문항이 다시 나오게 한다 — 자세한 근거는 `config.rotation_jitter`.
-        jitter = max(1, int(self.settings.rotation_jitter))
         # 실객체 수 범위 필터(step-up). 없으면 전체.
         oc_join = (" JOIN (SELECT question_id, SUM(role<>'invalid') oc FROM captcha_objects GROUP BY question_id) c"
                    " ON c.question_id=q.id AND c.oc BETWEEN %s AND %s") if min_obj is not None else ""
@@ -462,13 +477,13 @@ class Database:
             cur.execute(f"""SELECT q.* FROM captcha_questions q{oc_join}
               WHERE q.status='active' AND q.review_status='approved'
                 AND (q.last_served_at IS NULL OR q.last_served_at < UTC_TIMESTAMP(6) - INTERVAL %s SECOND)
-              ORDER BY q.served_count + RAND() * %s ASC LIMIT 1""",
-                        (*oc_args, cooldown, jitter))
+              ORDER BY -LOG(1 - RAND()) * (q.served_count + 1) ASC LIMIT 1""",
+                        (*oc_args, cooldown))
             question = cur.fetchone()
             if not question:  # 전부 쿨다운 중(풀이 작을 때)이면 쿨다운 무시
                 cur.execute(f"""SELECT q.* FROM captcha_questions q{oc_join}
                   WHERE q.status='active' AND q.review_status='approved'
-                  ORDER BY q.served_count + RAND() * %s ASC LIMIT 1""", (*oc_args, jitter))
+                  ORDER BY -LOG(1 - RAND()) * (q.served_count + 1) ASC LIMIT 1""", oc_args)
                 question = cur.fetchone()
             if not question: conn.commit(); return None
             cur.execute("UPDATE captcha_questions SET served_count=served_count+1, last_served_at=UTC_TIMESTAMP(6) WHERE id=%s", (question["id"],))
