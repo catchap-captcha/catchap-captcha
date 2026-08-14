@@ -107,6 +107,11 @@ jobs:
           push: true
           tags: ${{ env.REGISTRY }}/${{ env.IMAGE_PATH }}:${{ steps.tag.outputs.sha }}
           # ★latest 는 일부러 안 붙입니다 — 무엇이 떠 있는지 알 수 없어집니다
+          # ★같은 값을 앱 안에도 심습니다 — `/health/ready` 가 이걸 그대로 돌려줍니다.
+          #   이게 없으면 「지금 뜬 파드가 어느 커밋인가」를 바깥에서 알 방법이 없어,
+          #   동작으로 추정하게 됩니다(2026-08-14 에 그러다 2시간을 오진했습니다).
+          build-args: |
+            GIT_SHA=${{ steps.tag.outputs.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           provenance: false

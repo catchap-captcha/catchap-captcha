@@ -10,6 +10,10 @@
 
 FROM python:3.12-slim
 
+# ★어떤 커밋으로 만든 이미지인지 심는다. 없으면 "unknown" 이다.
+#   빌드할 때만 넣을 수 있는 값이라 여기 말고는 넣을 곳이 없다.
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONIOENCODING=utf-8 \
