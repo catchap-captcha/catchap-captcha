@@ -804,6 +804,15 @@ def _retry_delay_seconds(failures: int) -> int:
 @app.post("/api/captcha/challenges", status_code=status.HTTP_201_CREATED)
 def create_challenge(payload: ChallengeCreate, request: Request, x_captcha_site_key: str | None = Header(None)):
     require_header(x_captcha_site_key, settings.site_key, "Invalid site key"); check_origin(request)
+    # ★안 풀고 시간을 넘긴 문제를 먼저 실패로 기록한다.
+    #
+    #   여기서 하는 이유 — 새 문제를 받으려면 반드시 이 길을 지난다. 프론트가
+    #   "시간 지났어요" 를 알려주는 방식이면 봇은 그냥 안 알리면 그만이다.
+    #
+    #   ⚠️`request_pattern` **앞에** 두어야 방금 기록한 실패가 이번 판단에 반영된다.
+    #   뒤에 두면 한 판씩 늦게 반영돼, 실패 다섯 번째에 걸려야 할 세션이 여섯 번째에
+    #   걸린다.
+    database.expire_stale_challenges(payload.session_id)
     ip_hash=hash_value(client_ip(request)); pattern=database.request_pattern(payload.session_id,ip_hash)
     if pattern["ip_challenges_1m"]>=settings.max_challenges_per_minute:
         raise HTTPException(429,"Too many CAPTCHA requests")

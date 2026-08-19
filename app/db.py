@@ -548,6 +548,48 @@ class Database:
                     return row["piece_path"]
             return None
 
+    def expire_stale_challenges(self, session_id: str) -> int:
+        """안 푼 채 시간이 지난 문제를 **틀린 것으로 기록한다.** 기록한 개수를 돌려준다.
+
+        왜 필요한가
+        -----------
+        문제 하나는 60초만 산다(`CHALLENGE_TTL_SECONDS`). 그런데 시간이 지나 버려진
+        문제는 **아무 데도 안 남았다.** 실패 횟수는 `captcha_attempts` 의 오답 행으로
+        세는데, 안 풀고 넘긴 시도는 그 행을 만들지 않기 때문이다.
+
+        그래서 이런 구멍이 있었다 — 문제를 받고 **그냥 놔두면 벌이 없다.** 사람은
+        새 문제를 받아 다시 풀지만, 봇은 마음에 안 드는 문제를 무한히 넘길 수 있었다.
+
+        ★화면이 알려주기를 기다리지 않는다. "시간 지났어요" 를 프론트가 보내주는
+          방식이면 봇은 그냥 안 보내면 그만이다. 대신 **새 문제를 달라고 할 때**
+          서버가 직접 지난 것들을 훑는다. 새 문제를 받으려면 반드시 여기를 지난다.
+
+        ★`failure_reason='expired'` 로 남긴다. 진짜 오답과 섞이면 나중에 "사람 오답률"
+          을 잴 때 안 푼 것까지 오답으로 세게 된다.
+        """
+        recorded = 0
+        with self.connection() as conn, conn.cursor() as cur:
+            cur.execute("""SELECT id FROM captcha_challenges_v2
+              WHERE session_id=%s AND status='issued' AND expires_at<=UTC_TIMESTAMP(6)""",
+                        (session_id,))
+            stale = [row["id"] for row in cur.fetchall()]
+            for challenge_id in stale:
+                cur.execute("""INSERT INTO captcha_attempts
+                  (challenge_id, selected_object_ids, is_correct, failure_reason,
+                   duration_ms, behavior_summary, raw_event_path, created_at)
+                  VALUES(%s,%s,0,'expired',0,NULL,NULL,%s)""",
+                            (challenge_id, json.dumps([]), utcnow()))
+                # 상태를 옮겨 두 번 세지 않게 한다 — 다음에 훑을 때 안 걸린다.
+                cur.execute("""UPDATE captcha_challenges_v2
+                  SET attempt_count=attempt_count+1, status='expired' WHERE id=%s""",
+                            (challenge_id,))
+                recorded += 1
+            conn.commit()
+        if recorded and self.cache.enabled:
+            for _ in range(recorded):
+                self.cache.bump("session_failures_10m", session_id)
+        return recorded
+
     def request_pattern(self, session_id: str, client_ip_hash: str) -> dict[str, int]:
         with self.connection(True) as conn, conn.cursor() as cur:
             cur.execute("""SELECT COUNT(*) n FROM captcha_challenges_v2
